@@ -72,10 +72,10 @@ def init_db() -> None:
                     estoque_minimo INTEGER NOT NULL DEFAULT 0,
                     estoque_recomendado INTEGER NOT NULL DEFAULT 0,
                     quantidade_enviar_full INTEGER GENERATED ALWAYS AS (
-                        GREATEST(estoque_recomendado - quantidade_full, 0)
+                        GREATEST((CASE WHEN estoque_recomendado > 0 THEN estoque_recomendado ELSE estoque_minimo END) - quantidade_full, 0)
                     ) STORED,
                     precisa_repor TEXT GENERATED ALWAYS AS (
-                        CASE WHEN quantidade_full <= estoque_minimo THEN 'SIM' ELSE 'NAO' END
+                        CASE WHEN estoque_minimo > 0 AND quantidade_full <= estoque_minimo THEN 'SIM' ELSE 'NAO' END
                     ) STORED,
                     criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -102,6 +102,28 @@ def init_db() -> None:
                 )
                 """
             )
+            # Migração segura para corrigir a regra de envio/reposição em bancos já criados.
+            # Se estoque_recomendado estiver zerado, usamos estoque_minimo como referência provisória.
+            # Assim um item abaixo do mínimo não aparece com "Enviar = 0".
+            cur.execute("ALTER TABLE anuncios_full DROP COLUMN IF EXISTS quantidade_enviar_full")
+            cur.execute(
+                """
+                ALTER TABLE anuncios_full
+                ADD COLUMN quantidade_enviar_full INTEGER GENERATED ALWAYS AS (
+                    GREATEST((CASE WHEN estoque_recomendado > 0 THEN estoque_recomendado ELSE estoque_minimo END) - quantidade_full, 0)
+                ) STORED
+                """
+            )
+            cur.execute("ALTER TABLE anuncios_full DROP COLUMN IF EXISTS precisa_repor")
+            cur.execute(
+                """
+                ALTER TABLE anuncios_full
+                ADD COLUMN precisa_repor TEXT GENERATED ALWAYS AS (
+                    CASE WHEN estoque_minimo > 0 AND quantidade_full <= estoque_minimo THEN 'SIM' ELSE 'NAO' END
+                ) STORED
+                """
+            )
+
             cur.execute("SELECT COUNT(*) AS total FROM anuncios_full")
             total = cur.fetchone()["total"]
         conn.commit()
