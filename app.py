@@ -253,6 +253,10 @@ def index():
         where.append("ativo_no_relatorio = 'SIM'")
     elif filtro == "inativos":
         where.append("ativo_no_relatorio = 'NAO'")
+    elif filtro == "status_ativo":
+        where.append("ativo_no_relatorio = 'SIM' AND status ILIKE 'ativo%'")
+    elif filtro == "status_inativo":
+        where.append("ativo_no_relatorio = 'SIM' AND status ILIKE 'inativo%'")
     elif filtro == "repor":
         where.append("ativo_no_relatorio = 'SIM' AND precisa_repor = 'SIM'")
     elif filtro == "enviar":
@@ -275,6 +279,7 @@ def index():
                     COUNT(*) AS total_base,
                     COALESCE(SUM(CASE WHEN ativo_no_relatorio = 'SIM' THEN 1 ELSE 0 END), 0) AS total_anuncios,
                     COALESCE(SUM(CASE WHEN ativo_no_relatorio = 'NAO' THEN 1 ELSE 0 END), 0) AS total_inativos,
+                    COALESCE(SUM(CASE WHEN ativo_no_relatorio = 'SIM' AND status ILIKE 'inativo%' THEN 1 ELSE 0 END), 0) AS total_status_inativo,
                     COALESCE(SUM(CASE WHEN ativo_no_relatorio = 'SIM' THEN quantidade_full ELSE 0 END), 0) AS total_full,
                     COALESCE(SUM(CASE WHEN ativo_no_relatorio = 'SIM' THEN quantidade_enviar_full ELSE 0 END), 0) AS total_enviar,
                     COALESCE(SUM(CASE WHEN ativo_no_relatorio = 'SIM' AND precisa_repor = 'SIM' THEN 1 ELSE 0 END), 0) AS qtd_repor,
@@ -470,7 +475,7 @@ def exportar():
         df = pd.read_sql_query(
             """
             SELECT codigo_anuncio, numero_produto, titulo, quantidade_full, estoque_minimo,
-                   estoque_recomendado, quantidade_enviar_full, precisa_repor, preco, status, forma_entrega
+                   estoque_recomendado, quantidade_enviar_full, precisa_repor, preco, status, forma_entrega, observacao
             FROM anuncios_full
             WHERE ativo_no_relatorio = 'SIM' AND quantidade_enviar_full > 0
             ORDER BY quantidade_enviar_full DESC, titulo ASC
