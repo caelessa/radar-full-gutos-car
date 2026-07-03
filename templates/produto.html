@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block content %}
+<h3 class="mb-3">Configurar estoque</h3>
+<div class="card mb-4">
+  <div class="card-body">
+    <h5>{{ row.titulo }}</h5>
+    <p class="mb-1"><strong>Código:</strong> {{ row.codigo_anuncio }}</p>
+    <p class="mb-1"><strong>SKU:</strong> {{ row.numero_produto }}</p>
+    <p class="mb-1"><strong>Ativo no relatório atual:</strong> {{ row.ativo_no_relatorio }}</p>
+    <p class="mb-1"><strong>Quantidade atual no Full:</strong> {{ row.quantidade_full }}</p>
+    <p class="mb-0"><strong>Quantidade calculada para enviar:</strong> {{ row.quantidade_enviar_full }}</p>
+  </div>
+</div>
+
+<form method="post" class="card" style="max-width: 620px;">
+  <div class="card-body">
+    <div class="mb-3">
+      <label class="form-label">Estoque mínimo</label>
+      <input type="number" min="0" class="form-control" name="estoque_minimo" value="{{ row.estoque_minimo }}">
+    </div>
+    <div class="mb-3">
+      <label class="form-label">Estoque recomendado</label>
+      <input type="number" min="0" class="form-control" name="estoque_recomendado" value="{{ row.estoque_recomendado }}">
+    </div>
+    <div class="mb-3">
+      <label class="form-label">Observação</label>
+      <textarea class="form-control" name="observacao" rows="3">{{ row.observacao or '' }}</textarea>
+    </div>
+    <button class="btn btn-success">Salvar</button>
+    <a href="{{ url_for('index') }}" class="btn btn-outline-secondary">Voltar</a>
+  </div>
+</form>
+{% endblock %}

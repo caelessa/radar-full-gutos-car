@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block content %}
+<h3 class="mb-3">Importar relatório atualizado</h3>
+
+<div class="alert alert-secondary" style="max-width: 900px;">
+  A importação agora aceita anúncios novos automaticamente. Quando um anúncio não existir no banco, ele será cadastrado com estoque mínimo e recomendado zerados. Anúncios que não vierem no relatório novo não serão apagados: serão marcados como ausentes/inativos.
+</div>
+
+<div class="card mb-4" style="max-width: 760px;">
+  <div class="card-body">
+    <form method="post" enctype="multipart/form-data">
+      <div class="mb-3">
+        <label class="form-label">Arquivo Excel do Mercado Livre</label>
+        <input class="form-control" type="file" name="arquivo" accept=".xlsx,.xls" required>
+      </div>
+      <button class="btn btn-primary">Importar e atualizar banco</button>
+    </form>
+  </div>
+</div>
+
+{% if resultado %}
+<div class="alert alert-info">
+  Relatório com <strong>{{ resultado.total_relatorio }}</strong> anúncios. Backup criado: <strong>{{ resultado.backup }}</strong>.
+</div>
+
+<h5>Novos adicionados: {{ resultado.novos|length }}</h5>
+{% if resultado.novos %}
+<div class="table-responsive mb-4">
+<table class="table table-sm table-striped bg-white">
+  <thead><tr><th>Código</th><th>Produto</th><th class="text-end">Full</th><th>Situação</th></tr></thead>
+  <tbody>
+    {% for item in resultado.novos %}
+    <tr>
+      <td>{{ item.codigo_anuncio }}</td>
+      <td>{{ item.titulo }}</td>
+      <td class="text-end">{{ item.quantidade_full }}</td>
+      <td><span class="badge bg-warning text-dark">Configurar mínimo/recomendado</span></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% else %}
+<p>Nenhum anúncio novo.</p>
+{% endif %}
+
+<h5>Alterados: {{ resultado.alterados|length }}</h5>
+<div class="table-responsive mb-4">
+<table class="table table-sm table-striped bg-white">
+  <thead><tr><th>Código</th><th>Produto</th><th>Campos alterados</th></tr></thead>
+  <tbody>
+    {% for item in resultado.alterados %}
+    <tr>
+      <td>{{ item.codigo_anuncio }}</td>
+      <td>{{ item.titulo }}</td>
+      <td>
+        {% for campo, vals in item.changes.items() %}
+          <div><strong>{{ campo }}</strong>: {{ vals.antes }} → {{ vals.depois }}</div>
+        {% endfor %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<h5>Ausentes no relatório novo: {{ resultado.ausentes|length }}</h5>
+<p>Esses anúncios foram mantidos no banco, mas marcados como <strong>ativo_no_relatorio = NÃO</strong>.</p>
+{% if resultado.ausentes %}
+<ul>
+  {% for item in resultado.ausentes %}<li>{{ item.codigo_anuncio }} — {{ item.titulo }} — Full anterior: {{ item.quantidade_full }}</li>{% endfor %}
+</ul>
+{% endif %}
+{% endif %}
+{% endblock %}

@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block content %}
+<h3 class="mb-3">Dashboard de reposição Full</h3>
+
+<div class="row g-3 mb-4">
+  <div class="col-md-2"><div class="card metric"><div class="card-body"><small>Ativos no relatório</small><h3>{{ metrics.total_anuncios or 0 }}</h3></div></div></div>
+  <div class="col-md-2"><div class="card metric"><div class="card-body"><small>Unidades no Full</small><h3>{{ metrics.total_full or 0 }}</h3></div></div></div>
+  <div class="col-md-2"><div class="card metric"><div class="card-body"><small>Total a enviar</small><h3>{{ metrics.total_enviar or 0 }}</h3></div></div></div>
+  <div class="col-md-2"><div class="card metric"><div class="card-body"><small>Precisam repor</small><h3>{{ metrics.qtd_repor or 0 }}</h3></div></div></div>
+  <div class="col-md-2"><div class="card metric"><div class="card-body"><small>Sem configuração</small><h3>{{ metrics.sem_config or 0 }}</h3></div></div></div>
+  <div class="col-md-2"><div class="card metric"><div class="card-body"><small>Inativos/ausentes</small><h3>{{ metrics.total_inativos or 0 }}</h3></div></div></div>
+</div>
+
+<form class="row g-2 mb-3" method="get">
+  <div class="col-md-5">
+    <input class="form-control" name="busca" value="{{ busca }}" placeholder="Pesquisar por código, SKU ou título">
+  </div>
+  <div class="col-md-3">
+    <select class="form-select" name="filtro">
+      <option value="ativos" {% if filtro == 'ativos' %}selected{% endif %}>Somente ativos no relatório</option>
+      <option value="todos" {% if filtro == 'todos' %}selected{% endif %}>Todos da base</option>
+      <option value="enviar" {% if filtro == 'enviar' %}selected{% endif %}>Com quantidade a enviar</option>
+      <option value="repor" {% if filtro == 'repor' %}selected{% endif %}>Atingiu estoque mínimo</option>
+      <option value="sem_config" {% if filtro == 'sem_config' %}selected{% endif %}>Sem mínimo/recomendado</option>
+      <option value="inativos" {% if filtro == 'inativos' %}selected{% endif %}>Ausentes/Inativos</option>
+    </select>
+  </div>
+  <div class="col-md-2"><button class="btn btn-primary w-100">Pesquisar</button></div>
+  <div class="col-md-2"><a class="btn btn-outline-secondary w-100" href="{{ url_for('index') }}">Limpar</a></div>
+</form>
+
+<div class="table-responsive">
+<table class="table table-sm table-striped table-hover bg-white">
+  <thead class="table-dark">
+    <tr>
+      <th>Código anúncio</th>
+      <th>SKU</th>
+      <th class="title-col">Produto</th>
+      <th>Ativo</th>
+      <th class="text-end">Full</th>
+      <th class="text-end">Mínimo</th>
+      <th class="text-end">Recomendado</th>
+      <th class="text-end">Enviar</th>
+      <th>Reposição</th>
+      <th class="text-end">Preço</th>
+      <th>Status</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in rows %}
+    <tr>
+      <td>{{ r.codigo_anuncio }}</td>
+      <td>{{ r.numero_produto }}</td>
+      <td>{{ r.titulo }}</td>
+      <td>
+        {% if r.ativo_no_relatorio == 'SIM' %}<span class="badge bg-success">SIM</span>{% else %}<span class="badge bg-warning text-dark">NÃO</span>{% endif %}
+      </td>
+      <td class="text-end">{{ r.quantidade_full }}</td>
+      <td class="text-end">{{ r.estoque_minimo }}</td>
+      <td class="text-end">{{ r.estoque_recomendado }}</td>
+      <td class="text-end fw-bold">{{ r.quantidade_enviar_full }}</td>
+      <td>
+        {% if r.precisa_repor == 'SIM' %}<span class="badge bg-danger">SIM</span>{% else %}<span class="badge bg-secondary">NÃO</span>{% endif %}
+      </td>
+      <td class="text-end">R$ {{ "%.2f"|format(r.preco or 0) }}</td>
+      <td>{{ r.status }}</td>
+      <td><a class="btn btn-sm btn-outline-primary" href="{{ url_for('produto', produto_id=r.id) }}">Editar</a></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}
