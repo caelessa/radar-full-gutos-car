@@ -1,44 +1,37 @@
-# Radar Full Gutos Car - versão web online
+# Radar Full Gutos Car - PostgreSQL
 
-Aplicação Flask para controle de reposição do estoque Mercado Livre Full.
+Versão web Flask usando PostgreSQL via variável `DATABASE_URL`.
 
-## Rodar localmente
+## Variáveis no Render
+
+Crie uma variável de ambiente:
+
+```text
+DATABASE_URL=<string de conexão PostgreSQL>
+```
+
+Opcional:
+
+```text
+SECRET_KEY=uma-chave-qualquer
+```
+
+## Comandos no Render
+
+Build Command:
 
 ```bash
 pip install -r requirements.txt
-python app.py
 ```
 
-Acesse:
+Start Command:
 
-```text
-http://127.0.0.1:5000
+```bash
+gunicorn app:app
 ```
 
-## Publicar no Render
+## Observação
 
-1. Crie um repositório no GitHub e envie todos os arquivos desta pasta.
-2. No Render, clique em **New > Web Service**.
-3. Conecte o repositório.
-4. Configure:
-   - Build Command: `pip install -r requirements.txt`
-   - Start Command: `gunicorn app:app`
-5. Crie o serviço.
+Na primeira execução, a aplicação cria a tabela `anuncios_full` no PostgreSQL. Se a tabela estiver vazia, ela carrega automaticamente os dados iniciais do arquivo `radar_full_gutos.db` incluído no projeto.
 
-## Observação importante sobre banco SQLite
-
-O banco `radar_full_gutos.db` está dentro do projeto e funciona localmente.
-
-Em hospedagens gratuitas como Render, alterações no SQLite podem ser perdidas em redeploy/reinício se não houver disco persistente. Para uso real contínuo, use uma destas opções:
-
-- Render com Persistent Disk;
-- servidor/VPS;
-- migrar depois para PostgreSQL.
-
-## Fluxo de uso
-
-1. Abrir o dashboard.
-2. Importar relatório atualizado do Mercado Livre.
-3. Conferir anúncios novos, ausentes e alterados.
-4. Cadastrar estoque mínimo e recomendado.
-5. Exportar lista de reposição.
+Depois disso, alterações de estoque mínimo/recomendado e importações ficam salvas no PostgreSQL, não no disco temporário do Render.

@@ -1,52 +1,149 @@
 from __future__ import annotations
 
 import os
-import shutil
 import sqlite3
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse, urlunparse
 
 import pandas as pd
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from flask import Flask, flash, redirect, render_template, request, send_file, url_for
 
 BASE_DIR = Path(__file__).resolve().parent
-DB_PATH = BASE_DIR / "radar_full_gutos.db"
+SEED_SQLITE_PATH = BASE_DIR / "radar_full_gutos.db"
 UPLOAD_DIR = BASE_DIR / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
 
 app = Flask(__name__)
-app.secret_key = "radar-full-gutos-car"
+app.secret_key = os.environ.get("SECRET_KEY", "radar-full-gutos-car")
+
+FUSO_BRASIL = ZoneInfo("America/Sao_Paulo")
+
+def agora_brasil() -> datetime:
+    return datetime.now(FUSO_BRASIL)
+
+def agora_brasil_str() -> str:
+    return agora_brasil().strftime("%d/%m/%Y %H:%M:%S")
 
 
-def get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+def normalize_database_url(url: str) -> str:
+    """Aceita postgres:// e postgresql://."""
+    if url.startswith("postgres://"):
+        return "postgresql://" + url[len("postgres://"):]
+    return url
 
 
-def column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
-    cols = conn.execute(f"PRAGMA table_info({table})").fetchall()
-    return any(c[1] == column for c in cols)
+def get_conn():
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        raise RuntimeError(
+            "DATABASE_URL não configurada. Crie um PostgreSQL e cadastre a variável DATABASE_URL no Render."
+        )
+    return psycopg2.connect(normalize_database_url(database_url), cursor_factory=RealDictCursor)
 
 
 def init_db() -> None:
-    """Garante que o banco tenha os campos necessários para novos anúncios e ausentes."""
+    """Cria a tabela no PostgreSQL e carrega o banco seed SQLite se estiver vazio."""
     with get_conn() as conn:
-        # Migrações leves para bancos antigos já criados.
-        if not column_exists(conn, "anuncios_full", "ativo_no_relatorio"):
-            conn.execute("ALTER TABLE anuncios_full ADD COLUMN ativo_no_relatorio TEXT NOT NULL DEFAULT 'SIM'")
-        if not column_exists(conn, "anuncios_full", "data_ultima_importacao"):
-            conn.execute("ALTER TABLE anuncios_full ADD COLUMN data_ultima_importacao TEXT")
-        if not column_exists(conn, "anuncios_full", "data_primeira_importacao"):
-            conn.execute("ALTER TABLE anuncios_full ADD COLUMN data_primeira_importacao TEXT")
-        if not column_exists(conn, "anuncios_full", "observacao"):
-            conn.execute("ALTER TABLE anuncios_full ADD COLUMN observacao TEXT")
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS anuncios_full (
+                    id SERIAL PRIMARY KEY,
+                    codigo_anuncio TEXT NOT NULL UNIQUE,
+                    numero_produto TEXT,
+                    titulo TEXT,
+                    variacoes TEXT,
+                    quantidade_full INTEGER NOT NULL DEFAULT 0,
+                    preco NUMERIC(12,2) NOT NULL DEFAULT 0,
+                    moeda TEXT,
+                    condicao TEXT,
+                    forma_entrega TEXT,
+                    tipo_anuncio TEXT,
+                    status TEXT,
+                    altura_cm INTEGER DEFAULT 0,
+                    largura_cm INTEGER DEFAULT 0,
+                    profundidade_cm INTEGER DEFAULT 0,
+                    peso_kg NUMERIC(12,3) DEFAULT 0,
+                    estoque_minimo INTEGER NOT NULL DEFAULT 0,
+                    estoque_recomendado INTEGER NOT NULL DEFAULT 0,
+                    quantidade_enviar_full INTEGER GENERATED ALWAYS AS (
+                        GREATEST(estoque_recomendado - quantidade_full, 0)
+                    ) STORED,
+                    precisa_repor TEXT GENERATED ALWAYS AS (
+                        CASE WHEN quantidade_full <= estoque_minimo THEN 'SIM' ELSE 'NAO' END
+                    ) STORED,
+                    criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    ativo_no_relatorio TEXT DEFAULT 'SIM',
+                    data_ultima_importacao TEXT,
+                    data_primeira_importacao TEXT,
+                    observacao TEXT
+                )
+                """
+            )
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_anuncios_full_ativo ON anuncios_full(ativo_no_relatorio)")
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS importacoes_relatorios (
+                    id SERIAL PRIMARY KEY,
+                    data_importacao TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    data_importacao_br TEXT,
+                    nome_arquivo TEXT,
+                    total_relatorio INTEGER DEFAULT 0,
+                    qtd_novos INTEGER DEFAULT 0,
+                    qtd_alterados INTEGER DEFAULT 0,
+                    qtd_ausentes INTEGER DEFAULT 0,
+                    criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            cur.execute("SELECT COUNT(*) AS total FROM anuncios_full")
+            total = cur.fetchone()["total"]
+        conn.commit()
 
-        # Evita duplicidade por código de anúncio nas próximas importações.
-        conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_anuncios_full_codigo ON anuncios_full(codigo_anuncio)"
-        )
+    if total == 0 and SEED_SQLITE_PATH.exists():
+        seed_from_sqlite()
+
+
+def seed_from_sqlite() -> None:
+    """Importa os dados iniciais do radar_full_gutos.db para o PostgreSQL uma única vez."""
+    sqlite_conn = sqlite3.connect(SEED_SQLITE_PATH)
+    sqlite_conn.row_factory = sqlite3.Row
+    rows = sqlite_conn.execute("SELECT * FROM anuncios_full").fetchall()
+    sqlite_conn.close()
+
+    if not rows:
+        return
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            for row in rows:
+                r = dict(row)
+                cur.execute(
+                    """
+                    INSERT INTO anuncios_full (
+                        codigo_anuncio, numero_produto, titulo, variacoes, quantidade_full, preco, moeda, condicao,
+                        forma_entrega, tipo_anuncio, status, altura_cm, largura_cm, profundidade_cm, peso_kg,
+                        estoque_minimo, estoque_recomendado, ativo_no_relatorio,
+                        data_primeira_importacao, data_ultima_importacao, observacao
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (codigo_anuncio) DO NOTHING
+                    """,
+                    (
+                        r.get("codigo_anuncio"), r.get("numero_produto"), r.get("titulo"), r.get("variacoes"),
+                        int(r.get("quantidade_full") or 0), float(r.get("preco") or 0), r.get("moeda"),
+                        r.get("condicao"), r.get("forma_entrega"), r.get("tipo_anuncio"), r.get("status"),
+                        int(r.get("altura_cm") or 0), int(r.get("largura_cm") or 0), int(r.get("profundidade_cm") or 0),
+                        float(r.get("peso_kg") or 0), int(r.get("estoque_minimo") or 0),
+                        int(r.get("estoque_recomendado") or 0), r.get("ativo_no_relatorio") or "SIM",
+                        r.get("data_primeira_importacao"), r.get("data_ultima_importacao"), r.get("observacao"),
+                    ),
+                )
         conn.commit()
 
 
@@ -65,25 +162,15 @@ def int_safe(value: Any, default: int = 0) -> int:
 def float_safe(value: Any, default: float = 0.0) -> float:
     if pd.isna(value):
         return default
-
-    # Quando o pandas lê o Excel, PRICE geralmente já vem como número,
-    # por exemplo 129.99. Nesse caso NÃO podemos remover o ponto,
-    # senão 129.99 vira 12999.
     if isinstance(value, (int, float)):
         return float(value)
-
     try:
         text = str(value).strip()
         if text in {"", "-"}:
             return default
-
         text = text.replace("R$", "").strip()
-
-        # Formato brasileiro: 1.299,99 -> 1299.99
         if "," in text:
             text = text.replace(".", "").replace(",", ".")
-
-        # Formato americano/Excel: 129.99 -> 129.99
         return float(text)
     except Exception:
         return default
@@ -96,7 +183,6 @@ def get_series(df: pd.DataFrame, column: str, default: Any = "") -> pd.Series:
 
 
 def read_report(path: Path) -> pd.DataFrame:
-    """Lê o relatório de anúncios ativos do Mercado Livre na aba Anúncios."""
     df = pd.read_excel(path, sheet_name="Anúncios", header=0, skiprows=[1, 2, 3, 4])
     df = df.dropna(how="all")
 
@@ -137,7 +223,7 @@ def index():
     params: list[Any] = []
 
     if busca:
-        where.append("(codigo_anuncio LIKE ? OR numero_produto LIKE ? OR titulo LIKE ?)")
+        where.append("(codigo_anuncio ILIKE %s OR numero_produto ILIKE %s OR titulo ILIKE %s)")
         termo = f"%{busca}%"
         params.extend([termo, termo, termo])
 
@@ -149,9 +235,7 @@ def index():
         where.append("ativo_no_relatorio = 'SIM' AND precisa_repor = 'SIM'")
     elif filtro == "enviar":
         where.append("ativo_no_relatorio = 'SIM' AND quantidade_enviar_full > 0")
-    elif filtro == "sem_config":
-        where.append("ativo_no_relatorio = 'SIM' AND estoque_minimo = 0 AND estoque_recomendado = 0")
-    elif filtro == "novos":
+    elif filtro in {"sem_config", "novos"}:
         where.append("ativo_no_relatorio = 'SIM' AND estoque_minimo = 0 AND estoque_recomendado = 0")
 
     sql = "SELECT * FROM anuncios_full"
@@ -160,48 +244,69 @@ def index():
     sql += " ORDER BY ativo_no_relatorio DESC, quantidade_enviar_full DESC, titulo ASC"
 
     with get_conn() as conn:
-        rows = conn.execute(sql, params).fetchall()
-        metrics = conn.execute(
-            """
-            SELECT
-                COUNT(*) AS total_base,
-                SUM(CASE WHEN ativo_no_relatorio = 'SIM' THEN 1 ELSE 0 END) AS total_anuncios,
-                SUM(CASE WHEN ativo_no_relatorio = 'NAO' THEN 1 ELSE 0 END) AS total_inativos,
-                SUM(CASE WHEN ativo_no_relatorio = 'SIM' THEN quantidade_full ELSE 0 END) AS total_full,
-                SUM(CASE WHEN ativo_no_relatorio = 'SIM' THEN quantidade_enviar_full ELSE 0 END) AS total_enviar,
-                SUM(CASE WHEN ativo_no_relatorio = 'SIM' AND precisa_repor = 'SIM' THEN 1 ELSE 0 END) AS qtd_repor,
-                SUM(CASE WHEN ativo_no_relatorio = 'SIM' AND estoque_minimo = 0 AND estoque_recomendado = 0 THEN 1 ELSE 0 END) AS sem_config
-            FROM anuncios_full
-            """
-        ).fetchone()
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+            cur.execute(
+                """
+                SELECT
+                    COUNT(*) AS total_base,
+                    COALESCE(SUM(CASE WHEN ativo_no_relatorio = 'SIM' THEN 1 ELSE 0 END), 0) AS total_anuncios,
+                    COALESCE(SUM(CASE WHEN ativo_no_relatorio = 'NAO' THEN 1 ELSE 0 END), 0) AS total_inativos,
+                    COALESCE(SUM(CASE WHEN ativo_no_relatorio = 'SIM' THEN quantidade_full ELSE 0 END), 0) AS total_full,
+                    COALESCE(SUM(CASE WHEN ativo_no_relatorio = 'SIM' THEN quantidade_enviar_full ELSE 0 END), 0) AS total_enviar,
+                    COALESCE(SUM(CASE WHEN ativo_no_relatorio = 'SIM' AND precisa_repor = 'SIM' THEN 1 ELSE 0 END), 0) AS qtd_repor,
+                    COALESCE(SUM(CASE WHEN ativo_no_relatorio = 'SIM' AND estoque_minimo = 0 AND estoque_recomendado = 0 THEN 1 ELSE 0 END), 0) AS sem_config
+                FROM anuncios_full
+                """
+            )
+            metrics = cur.fetchone()
+            cur.execute(
+                """
+                SELECT data_importacao_br, nome_arquivo, total_relatorio, qtd_novos, qtd_alterados, qtd_ausentes
+                FROM importacoes_relatorios
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            )
+            ultima_importacao = cur.fetchone()
 
-    return render_template("index.html", rows=rows, metrics=metrics, busca=busca, filtro=filtro)
+    return render_template(
+        "index.html",
+        rows=rows,
+        metrics=metrics,
+        busca=busca,
+        filtro=filtro,
+        ultima_importacao=ultima_importacao,
+    )
 
 
 @app.route("/produto/<int:produto_id>", methods=["GET", "POST"])
 def produto(produto_id: int):
     init_db()
     with get_conn() as conn:
-        row = conn.execute("SELECT * FROM anuncios_full WHERE id = ?", (produto_id,)).fetchone()
-        if row is None:
-            flash("Produto não encontrado.", "danger")
-            return redirect(url_for("index"))
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM anuncios_full WHERE id = %s", (produto_id,))
+            row = cur.fetchone()
+            if row is None:
+                flash("Produto não encontrado.", "danger")
+                return redirect(url_for("index"))
 
-        if request.method == "POST":
-            estoque_minimo = int_safe(request.form.get("estoque_minimo"), 0)
-            estoque_recomendado = int_safe(request.form.get("estoque_recomendado"), 0)
-            observacao = request.form.get("observacao", "").strip()
-            conn.execute(
-                """
-                UPDATE anuncios_full
-                SET estoque_minimo = ?, estoque_recomendado = ?, observacao = ?, atualizado_em = CURRENT_TIMESTAMP
-                WHERE id = ?
-                """,
-                (estoque_minimo, estoque_recomendado, observacao, produto_id),
-            )
-            conn.commit()
-            flash("Estoque mínimo e recomendado atualizados.", "success")
-            return redirect(url_for("produto", produto_id=produto_id))
+            if request.method == "POST":
+                estoque_minimo = int_safe(request.form.get("estoque_minimo"), 0)
+                estoque_recomendado = int_safe(request.form.get("estoque_recomendado"), 0)
+                observacao = request.form.get("observacao", "").strip()
+                cur.execute(
+                    """
+                    UPDATE anuncios_full
+                    SET estoque_minimo = %s, estoque_recomendado = %s, observacao = %s, atualizado_em = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                    """,
+                    (estoque_minimo, estoque_recomendado, observacao, produto_id),
+                )
+                conn.commit()
+                flash("Estoque mínimo e recomendado atualizados.", "success")
+                return redirect(url_for("produto", produto_id=produto_id))
 
     return render_template("produto.html", row=row)
 
@@ -217,7 +322,7 @@ def importar():
             flash("Selecione um arquivo Excel.", "warning")
             return redirect(url_for("importar"))
 
-        filename = f"relatorio_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        filename = f"relatorio_{agora_brasil().strftime('%Y%m%d_%H%M%S')}.xlsx"
         path = UPLOAD_DIR / filename
         file.save(path)
 
@@ -226,87 +331,96 @@ def importar():
             if df_new.empty:
                 raise ValueError("Nenhum anúncio MLB encontrado na aba Anúncios.")
 
-            backup_path = BASE_DIR / f"backup_radar_full_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
-            shutil.copy2(DB_PATH, backup_path)
-
             alterados = []
             novos = []
             ausentes = []
-            import_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            import_time = agora_brasil_str()
 
             with get_conn() as conn:
-                old_rows = conn.execute("SELECT * FROM anuncios_full").fetchall()
-                old_by_code = {r["codigo_anuncio"]: dict(r) for r in old_rows}
-                new_codes = set(df_new["codigo_anuncio"].tolist())
-                old_codes = set(old_by_code.keys())
+                with conn.cursor() as cur:
+                    cur.execute("SELECT * FROM anuncios_full")
+                    old_rows = cur.fetchall()
+                    old_by_code = {r["codigo_anuncio"]: r for r in old_rows}
+                    new_codes = set(df_new["codigo_anuncio"].tolist())
+                    old_codes = set(old_by_code.keys())
 
-                # Primeiro marca todos como ausentes; os que vierem no relatório voltam para SIM.
-                conn.execute("UPDATE anuncios_full SET ativo_no_relatorio = 'NAO', atualizado_em = CURRENT_TIMESTAMP")
+                    cur.execute("UPDATE anuncios_full SET ativo_no_relatorio = 'NAO', atualizado_em = CURRENT_TIMESTAMP")
 
-                for _, r in df_new.iterrows():
-                    codigo = r["codigo_anuncio"]
-                    old = old_by_code.get(codigo)
+                    for _, r in df_new.iterrows():
+                        codigo = r["codigo_anuncio"]
+                        old = old_by_code.get(codigo)
 
-                    if old:
-                        changes = {}
-                        for col in [
-                            "numero_produto", "titulo", "variacoes", "quantidade_full", "preco", "moeda",
-                            "condicao", "forma_entrega", "tipo_anuncio", "status", "altura_cm", "largura_cm",
-                            "profundidade_cm", "peso_kg", "ativo_no_relatorio"
-                        ]:
-                            old_val = old.get(col)
-                            new_val = "SIM" if col == "ativo_no_relatorio" else r[col]
-                            if str(old_val) != str(new_val):
-                                changes[col] = {"antes": old_val, "depois": new_val}
+                        if old:
+                            changes = {}
+                            for col in [
+                                "numero_produto", "titulo", "variacoes", "quantidade_full", "preco", "moeda",
+                                "condicao", "forma_entrega", "tipo_anuncio", "status", "altura_cm", "largura_cm",
+                                "profundidade_cm", "peso_kg", "ativo_no_relatorio"
+                            ]:
+                                old_val = old.get(col)
+                                new_val = "SIM" if col == "ativo_no_relatorio" else r[col]
+                                if str(old_val) != str(new_val):
+                                    changes[col] = {"antes": old_val, "depois": new_val}
 
-                        if changes:
-                            alterados.append({"codigo_anuncio": codigo, "titulo": r["titulo"], "changes": changes})
+                            if changes:
+                                alterados.append({"codigo_anuncio": codigo, "titulo": r["titulo"], "changes": changes})
 
-                        conn.execute(
-                            """
-                            UPDATE anuncios_full
-                            SET numero_produto=?, titulo=?, variacoes=?, quantidade_full=?, preco=?, moeda=?, condicao=?,
-                                forma_entrega=?, tipo_anuncio=?, status=?, altura_cm=?, largura_cm=?, profundidade_cm=?,
-                                peso_kg=?, ativo_no_relatorio='SIM', data_ultima_importacao=?, atualizado_em=CURRENT_TIMESTAMP
-                            WHERE codigo_anuncio=?
-                            """,
-                            (
-                                r["numero_produto"], r["titulo"], r["variacoes"], int(r["quantidade_full"]),
-                                float(r["preco"]), r["moeda"], r["condicao"], r["forma_entrega"], r["tipo_anuncio"],
-                                r["status"], int(r["altura_cm"]), int(r["largura_cm"]), int(r["profundidade_cm"]),
-                                float(r["peso_kg"]), import_time, codigo,
-                            ),
-                        )
-                    else:
-                        novos.append({
-                            "codigo_anuncio": codigo,
-                            "titulo": r["titulo"],
-                            "quantidade_full": int(r["quantidade_full"]),
+                            cur.execute(
+                                """
+                                UPDATE anuncios_full
+                                SET numero_produto=%s, titulo=%s, variacoes=%s, quantidade_full=%s, preco=%s, moeda=%s,
+                                    condicao=%s, forma_entrega=%s, tipo_anuncio=%s, status=%s, altura_cm=%s, largura_cm=%s,
+                                    profundidade_cm=%s, peso_kg=%s, ativo_no_relatorio='SIM', data_ultima_importacao=%s,
+                                    atualizado_em=CURRENT_TIMESTAMP
+                                WHERE codigo_anuncio=%s
+                                """,
+                                (
+                                    r["numero_produto"], r["titulo"], r["variacoes"], int(r["quantidade_full"]),
+                                    float(r["preco"]), r["moeda"], r["condicao"], r["forma_entrega"], r["tipo_anuncio"],
+                                    r["status"], int(r["altura_cm"]), int(r["largura_cm"]), int(r["profundidade_cm"]),
+                                    float(r["peso_kg"]), import_time, codigo,
+                                ),
+                            )
+                        else:
+                            novos.append({
+                                "codigo_anuncio": codigo,
+                                "titulo": r["titulo"],
+                                "quantidade_full": int(r["quantidade_full"]),
+                            })
+                            cur.execute(
+                                """
+                                INSERT INTO anuncios_full (
+                                    codigo_anuncio, numero_produto, titulo, variacoes, quantidade_full, preco, moeda, condicao,
+                                    forma_entrega, tipo_anuncio, status, altura_cm, largura_cm, profundidade_cm, peso_kg,
+                                    estoque_minimo, estoque_recomendado, ativo_no_relatorio,
+                                    data_primeira_importacao, data_ultima_importacao
+                                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 0, 0, 'SIM', %s, %s)
+                                """,
+                                (
+                                    codigo, r["numero_produto"], r["titulo"], r["variacoes"], int(r["quantidade_full"]),
+                                    float(r["preco"]), r["moeda"], r["condicao"], r["forma_entrega"], r["tipo_anuncio"],
+                                    r["status"], int(r["altura_cm"]), int(r["largura_cm"]), int(r["profundidade_cm"]),
+                                    float(r["peso_kg"]), import_time, import_time,
+                                ),
+                            )
+
+                    missing_codes = sorted(old_codes - new_codes)
+                    for code in missing_codes:
+                        ausentes.append({
+                            "codigo_anuncio": code,
+                            "titulo": old_by_code[code].get("titulo", ""),
+                            "quantidade_full": old_by_code[code].get("quantidade_full", 0),
                         })
-                        conn.execute(
-                            """
-                            INSERT INTO anuncios_full (
-                                codigo_anuncio, numero_produto, titulo, variacoes, quantidade_full, preco, moeda, condicao,
-                                forma_entrega, tipo_anuncio, status, altura_cm, largura_cm, profundidade_cm, peso_kg,
-                                estoque_minimo, estoque_recomendado, ativo_no_relatorio,
-                                data_primeira_importacao, data_ultima_importacao
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 'SIM', ?, ?)
-                            """,
-                            (
-                                codigo, r["numero_produto"], r["titulo"], r["variacoes"], int(r["quantidade_full"]),
-                                float(r["preco"]), r["moeda"], r["condicao"], r["forma_entrega"], r["tipo_anuncio"],
-                                r["status"], int(r["altura_cm"]), int(r["largura_cm"]), int(r["profundidade_cm"]),
-                                float(r["peso_kg"]), import_time, import_time,
-                            ),
-                        )
 
-                missing_codes = sorted(old_codes - new_codes)
-                for code in missing_codes:
-                    ausentes.append({
-                        "codigo_anuncio": code,
-                        "titulo": old_by_code[code].get("titulo", ""),
-                        "quantidade_full": old_by_code[code].get("quantidade_full", 0),
-                    })
+                    cur.execute(
+                        """
+                        INSERT INTO importacoes_relatorios (
+                            data_importacao, data_importacao_br, nome_arquivo, total_relatorio,
+                            qtd_novos, qtd_alterados, qtd_ausentes
+                        ) VALUES (CURRENT_TIMESTAMP, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (import_time, file.filename, int(len(df_new)), len(novos), len(alterados), len(ausentes)),
+                    )
 
                 conn.commit()
 
@@ -315,9 +429,10 @@ def importar():
                 "alterados": alterados,
                 "novos": novos,
                 "ausentes": ausentes,
-                "backup": backup_path.name,
+                "data_importacao": import_time,
+                "nome_arquivo": file.filename,
             }
-            flash("Relatório importado com sucesso. Anúncios novos foram adicionados e ausentes foram marcados como inativos.", "success")
+            flash("Relatório importado com sucesso. Os dados agora ficam salvos no PostgreSQL.", "success")
 
         except Exception as e:
             flash(f"Erro ao importar relatório: {e}", "danger")
@@ -345,7 +460,6 @@ def exportar():
 
 
 if __name__ == "__main__":
-    import os
     init_db()
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=True)
