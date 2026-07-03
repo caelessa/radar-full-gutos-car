@@ -22,12 +22,13 @@
 {% endif %}
 
 <div class="row g-3 mb-4">
-  <div class="col-md-2"><div class="card metric"><div class="card-body"><small>Ativos no relatório</small><h3>{{ metrics.total_anuncios or 0 }}</h3></div></div></div>
+  <div class="col-md-2"><div class="card metric"><div class="card-body"><small>Presentes no relatório</small><h3>{{ metrics.total_anuncios or 0 }}</h3></div></div></div>
   <div class="col-md-2"><div class="card metric"><div class="card-body"><small>Unidades no Full</small><h3>{{ metrics.total_full or 0 }}</h3></div></div></div>
   <div class="col-md-2"><div class="card metric"><div class="card-body"><small>Total a enviar</small><h3>{{ metrics.total_enviar or 0 }}</h3></div></div></div>
   <div class="col-md-2"><div class="card metric"><div class="card-body"><small>Precisam repor</small><h3>{{ metrics.qtd_repor or 0 }}</h3></div></div></div>
   <div class="col-md-2"><div class="card metric"><div class="card-body"><small>Sem configuração</small><h3>{{ metrics.sem_config or 0 }}</h3></div></div></div>
-  <div class="col-md-2"><div class="card metric"><div class="card-body"><small>Inativos/ausentes</small><h3>{{ metrics.total_inativos or 0 }}</h3></div></div></div>
+  <div class="col-md-2"><div class="card metric"><div class="card-body"><small>Ausentes do relatório</small><h3>{{ metrics.total_inativos or 0 }}</h3></div></div></div>
+  <div class="col-md-2"><div class="card metric"><div class="card-body"><small>Status inativo ML</small><h3>{{ metrics.total_status_inativo or 0 }}</h3></div></div></div>
 </div>
 
 <form class="row g-2 mb-3" method="get">
@@ -36,12 +37,14 @@
   </div>
   <div class="col-md-3">
     <select class="form-select" name="filtro">
-      <option value="ativos" {% if filtro == 'ativos' %}selected{% endif %}>Somente ativos no relatório</option>
+      <option value="ativos" {% if filtro == 'ativos' %}selected{% endif %}>Presentes no último relatório</option>
       <option value="todos" {% if filtro == 'todos' %}selected{% endif %}>Todos da base</option>
+      <option value="status_ativo" {% if filtro == 'status_ativo' %}selected{% endif %}>Status ativo no Mercado Livre</option>
+      <option value="status_inativo" {% if filtro == 'status_inativo' %}selected{% endif %}>Status inativo no Mercado Livre</option>
       <option value="enviar" {% if filtro == 'enviar' %}selected{% endif %}>Com quantidade a enviar</option>
       <option value="repor" {% if filtro == 'repor' %}selected{% endif %}>Atingiu estoque mínimo</option>
       <option value="sem_config" {% if filtro == 'sem_config' %}selected{% endif %}>Sem mínimo/recomendado</option>
-      <option value="inativos" {% if filtro == 'inativos' %}selected{% endif %}>Ausentes/Inativos</option>
+      <option value="inativos" {% if filtro == 'inativos' %}selected{% endif %}>Ausentes do último relatório</option>
     </select>
   </div>
   <div class="col-md-2"><button class="btn btn-primary w-100">Pesquisar</button></div>
@@ -55,7 +58,7 @@
       <th>Código anúncio</th>
       <th>SKU</th>
       <th class="title-col">Produto</th>
-      <th>Ativo</th>
+      <th>No relatório</th>
       <th class="text-end">Full</th>
       <th class="text-end">Mínimo</th>
       <th class="text-end">Recomendado</th>
