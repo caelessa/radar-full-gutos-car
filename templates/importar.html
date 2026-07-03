@@ -20,7 +20,9 @@
 
 {% if resultado %}
 <div class="alert alert-info">
-  Relatório com <strong>{{ resultado.total_relatorio }}</strong> anúncios. Backup criado: <strong>{{ resultado.backup }}</strong>.
+  Relatório importado em <strong>{{ resultado.data_importacao }}</strong><br>
+  Arquivo: <strong>{{ resultado.nome_arquivo }}</strong><br>
+  Total do relatório: <strong>{{ resultado.total_relatorio }}</strong> anúncios.
 </div>
 
 <h5>Novos adicionados: {{ resultado.novos|length }}</h5>

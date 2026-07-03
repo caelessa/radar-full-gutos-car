@@ -2,6 +2,25 @@
 {% block content %}
 <h3 class="mb-3">Dashboard de reposição Full</h3>
 
+{% if ultima_importacao %}
+<div class="alert alert-primary d-flex flex-wrap justify-content-between align-items-center" style="max-width: 1100px;">
+  <div>
+    <strong>Última importação:</strong> {{ ultima_importacao.data_importacao_br }}
+    {% if ultima_importacao.nome_arquivo %} — arquivo: <strong>{{ ultima_importacao.nome_arquivo }}</strong>{% endif %}
+  </div>
+  <div class="small">
+    {{ ultima_importacao.total_relatorio or 0 }} anúncios ·
+    {{ ultima_importacao.qtd_alterados or 0 }} alterados ·
+    {{ ultima_importacao.qtd_novos or 0 }} novos ·
+    {{ ultima_importacao.qtd_ausentes or 0 }} ausentes
+  </div>
+</div>
+{% else %}
+<div class="alert alert-secondary" style="max-width: 900px;">
+  Nenhum relatório importado ainda no PostgreSQL.
+</div>
+{% endif %}
+
 <div class="row g-3 mb-4">
   <div class="col-md-2"><div class="card metric"><div class="card-body"><small>Ativos no relatório</small><h3>{{ metrics.total_anuncios or 0 }}</h3></div></div></div>
   <div class="col-md-2"><div class="card metric"><div class="card-body"><small>Unidades no Full</small><h3>{{ metrics.total_full or 0 }}</h3></div></div></div>
