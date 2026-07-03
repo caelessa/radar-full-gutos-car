@@ -9,8 +9,8 @@ from typing import Any
 from urllib.parse import urlparse, urlunparse
 
 import pandas as pd
-import psycopg2
-from psycopg2.extras import RealDictCursor
+import psycopg
+from psycopg.rows import dict_row
 from flask import Flask, flash, redirect, render_template, request, send_file, url_for
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -43,7 +43,7 @@ def get_conn():
         raise RuntimeError(
             "DATABASE_URL não configurada. Crie um PostgreSQL e cadastre a variável DATABASE_URL no Render."
         )
-    return psycopg2.connect(normalize_database_url(database_url), cursor_factory=RealDictCursor)
+    return psycopg.connect(normalize_database_url(database_url), row_factory=dict_row)
 
 
 def init_db() -> None:
