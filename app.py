@@ -103,27 +103,14 @@ def init_db() -> None:
                 )
                 """
             )
-            # Migração segura para corrigir a regra de envio/reposição em bancos já criados.
-            # Se estoque_recomendado estiver zerado, usamos estoque_minimo como referência provisória.
-            # Assim um item abaixo do mínimo não aparece com "Enviar = 0".
-            cur.execute("ALTER TABLE anuncios_full DROP COLUMN IF EXISTS quantidade_enviar_full")
-            cur.execute(
-                """
-                ALTER TABLE anuncios_full
-                ADD COLUMN quantidade_enviar_full INTEGER GENERATED ALWAYS AS (
-                    GREATEST((CASE WHEN estoque_recomendado > 0 THEN estoque_recomendado ELSE estoque_minimo END) - quantidade_full, 0)
-                ) STORED
-                """
-            )
-            cur.execute("ALTER TABLE anuncios_full DROP COLUMN IF EXISTS precisa_repor")
-            cur.execute(
-                """
-                ALTER TABLE anuncios_full
-                ADD COLUMN precisa_repor TEXT GENERATED ALWAYS AS (
-                    CASE WHEN estoque_minimo > 0 AND quantidade_full <= estoque_minimo THEN 'SIM' ELSE 'NAO' END
-                ) STORED
-                """
-            )
+            # IMPORTANTE:
+            # Não fazemos DROP/ADD das colunas geradas a cada abertura da página.
+            # A versão anterior repetia ALTER TABLE em todo acesso e o PostgreSQL
+            # acumulava colunas internas removidas, causando:
+            # psycopg.errors.TooManyColumns: tables can have at most 1600 columns.
+            #
+            # A regra de envio/reposição agora é calculada nas consultas principais
+            # quando necessário, e as colunas geradas existentes são mantidas.
 
             cur.execute("SELECT COUNT(*) AS total FROM anuncios_full")
             total = cur.fetchone()["total"]
