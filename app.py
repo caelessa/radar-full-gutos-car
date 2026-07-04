@@ -269,9 +269,11 @@ def index():
     elif filtro == "inativos":
         where.append("ativo_no_relatorio = 'NAO'")
     elif filtro == "status_ativo":
-        where.append("ativo_no_relatorio = 'SIM' AND status ILIKE 'ativo%'")
+        where.append("ativo_no_relatorio = 'SIM' AND status ILIKE %s")
+        params.append('ativo%')
     elif filtro == "status_inativo":
-        where.append("ativo_no_relatorio = 'SIM' AND status ILIKE 'inativo%'")
+        where.append("ativo_no_relatorio = 'SIM' AND status ILIKE %s")
+        params.append('inativo%')
     elif filtro == "repor":
         where.append("ativo_no_relatorio = 'SIM' AND precisa_repor = 'SIM'")
     elif filtro == "enviar":
@@ -294,7 +296,7 @@ def index():
                     COUNT(*) AS total_base,
                     COALESCE(SUM(CASE WHEN ativo_no_relatorio = 'SIM' THEN 1 ELSE 0 END), 0) AS total_anuncios,
                     COALESCE(SUM(CASE WHEN ativo_no_relatorio = 'NAO' THEN 1 ELSE 0 END), 0) AS total_inativos,
-                    COALESCE(SUM(CASE WHEN ativo_no_relatorio = 'SIM' AND status ILIKE 'inativo%' THEN 1 ELSE 0 END), 0) AS total_status_inativo,
+                    COALESCE(SUM(CASE WHEN ativo_no_relatorio = 'SIM' AND status ILIKE 'inativo%%' THEN 1 ELSE 0 END), 0) AS total_status_inativo,
                     COALESCE(SUM(CASE WHEN ativo_no_relatorio = 'SIM' THEN quantidade_full ELSE 0 END), 0) AS total_full,
                     COALESCE(SUM(CASE WHEN ativo_no_relatorio = 'SIM' THEN quantidade_enviar_full ELSE 0 END), 0) AS total_enviar,
                     COALESCE(SUM(CASE WHEN ativo_no_relatorio = 'SIM' AND precisa_repor = 'SIM' THEN 1 ELSE 0 END), 0) AS qtd_repor,
