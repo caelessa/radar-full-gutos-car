@@ -471,17 +471,60 @@ def importar():
 def exportar():
     init_db()
     out_path = BASE_DIR / "reposicao_full.csv"
+
+    # Exportação corrigida:
+    # calcula a quantidade a enviar na própria consulta, em vez de depender apenas da coluna gerada.
+    # Também exporta produtos que atingiram o mínimo, mesmo que o recomendado ainda esteja zerado.
     with get_conn() as conn:
         df = pd.read_sql_query(
             """
-            SELECT codigo_anuncio, numero_produto, titulo, quantidade_full, estoque_minimo,
-                   estoque_recomendado, quantidade_enviar_full, precisa_repor, preco, status, forma_entrega, observacao
-            FROM anuncios_full
-            WHERE ativo_no_relatorio = 'SIM' AND quantidade_enviar_full > 0
-            ORDER BY quantidade_enviar_full DESC, titulo ASC
+            WITH base AS (
+                SELECT
+                    codigo_anuncio,
+                    numero_produto,
+                    titulo,
+                    quantidade_full,
+                    estoque_minimo,
+                    estoque_recomendado,
+                    GREATEST(
+                        (CASE
+                            WHEN estoque_recomendado > 0 THEN estoque_recomendado
+                            ELSE estoque_minimo
+                         END) - quantidade_full,
+                        0
+                    ) AS quantidade_enviar_full_calc,
+                    CASE
+                        WHEN estoque_minimo > 0 AND quantidade_full <= estoque_minimo THEN 'SIM'
+                        ELSE 'NAO'
+                    END AS precisa_repor_calc,
+                    preco,
+                    status,
+                    forma_entrega,
+                    observacao
+                FROM anuncios_full
+                WHERE ativo_no_relatorio = 'SIM'
+            )
+            SELECT
+                codigo_anuncio,
+                numero_produto,
+                titulo,
+                quantidade_full,
+                estoque_minimo,
+                estoque_recomendado,
+                quantidade_enviar_full_calc AS quantidade_enviar_full,
+                precisa_repor_calc AS precisa_repor,
+                preco,
+                status,
+                forma_entrega,
+                observacao
+            FROM base
+            WHERE quantidade_enviar_full_calc > 0
+               OR precisa_repor_calc = 'SIM'
+            ORDER BY quantidade_enviar_full_calc DESC, titulo ASC
             """,
             conn,
         )
+
     df.to_csv(out_path, index=False, sep=";", encoding="utf-8-sig")
     return send_file(out_path, as_attachment=True, download_name="reposicao_full.csv")
 
