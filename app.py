@@ -471,19 +471,114 @@ def importar():
 def exportar():
     init_db()
     out_path = BASE_DIR / "reposicao_full.csv"
-    with get_conn() as conn:
-        df = pd.read_sql_query(
-            """
-            SELECT codigo_anuncio, numero_produto, titulo, quantidade_full, estoque_minimo,
-                   estoque_recomendado, quantidade_enviar_full, precisa_repor, preco, status, forma_entrega, observacao
+
+    # Exportação robusta:
+    # - não depende da coluna gerada quantidade_enviar_full;
+    # - recalcula a reposição na hora;
+    # - trata NULL como zero;
+    # - aceita variações de ativo_no_relatorio, como SIM/sim/S/true/1;
+    # - exporta tudo que tem quantidade a enviar > 0 ou reposição = SIM.
+    sql = """
+        WITH base AS (
+            SELECT
+                codigo_anuncio,
+                numero_produto,
+                titulo,
+                COALESCE(quantidade_full, 0)::INTEGER AS quantidade_full,
+                COALESCE(estoque_minimo, 0)::INTEGER AS estoque_minimo,
+                COALESCE(estoque_recomendado, 0)::INTEGER AS estoque_recomendado,
+                GREATEST(
+                    (CASE
+                        WHEN COALESCE(estoque_recomendado, 0) > 0
+                            THEN COALESCE(estoque_recomendado, 0)
+                        ELSE COALESCE(estoque_minimo, 0)
+                     END) - COALESCE(quantidade_full, 0),
+                    0
+                )::INTEGER AS quantidade_enviar_full,
+                CASE
+                    WHEN COALESCE(estoque_minimo, 0) > 0
+                     AND COALESCE(quantidade_full, 0) <= COALESCE(estoque_minimo, 0)
+                    THEN 'SIM'
+                    ELSE 'NAO'
+                END AS precisa_repor,
+                COALESCE(preco, 0) AS preco,
+                COALESCE(status, '') AS status,
+                COALESCE(forma_entrega, '') AS forma_entrega,
+                COALESCE(observacao, '') AS observacao,
+                COALESCE(ativo_no_relatorio, 'SIM') AS no_relatorio
             FROM anuncios_full
-            WHERE ativo_no_relatorio = 'SIM' AND quantidade_enviar_full > 0
-            ORDER BY quantidade_enviar_full DESC, titulo ASC
-            """,
-            conn,
+            WHERE UPPER(TRIM(COALESCE(ativo_no_relatorio, 'SIM'))) IN ('SIM', 'S', 'YES', 'TRUE', '1')
         )
+        SELECT
+            codigo_anuncio,
+            numero_produto,
+            titulo,
+            quantidade_full,
+            estoque_minimo,
+            estoque_recomendado,
+            quantidade_enviar_full,
+            precisa_repor,
+            preco,
+            status,
+            forma_entrega,
+            observacao
+        FROM base
+        WHERE quantidade_enviar_full > 0
+           OR precisa_repor = 'SIM'
+        ORDER BY quantidade_enviar_full DESC, titulo ASC
+    """
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            rows = cur.fetchall()
+
+    colunas = [
+        "codigo_anuncio", "numero_produto", "titulo", "quantidade_full",
+        "estoque_minimo", "estoque_recomendado", "quantidade_enviar_full",
+        "precisa_repor", "preco", "status", "forma_entrega", "observacao"
+    ]
+    df = pd.DataFrame(rows, columns=colunas)
+
+    # Mesmo que não haja itens, o CSV sai com cabeçalho para facilitar diagnóstico.
     df.to_csv(out_path, index=False, sep=";", encoding="utf-8-sig")
     return send_file(out_path, as_attachment=True, download_name="reposicao_full.csv")
+
+
+@app.route("/diagnostico-exportacao")
+def diagnostico_exportacao():
+    """Tela simples para conferir se o banco tem itens que deveriam sair no CSV."""
+    init_db()
+    sql = """
+        SELECT
+            codigo_anuncio,
+            titulo,
+            COALESCE(quantidade_full, 0)::INTEGER AS quantidade_full,
+            COALESCE(estoque_minimo, 0)::INTEGER AS estoque_minimo,
+            COALESCE(estoque_recomendado, 0)::INTEGER AS estoque_recomendado,
+            GREATEST(
+                (CASE
+                    WHEN COALESCE(estoque_recomendado, 0) > 0 THEN COALESCE(estoque_recomendado, 0)
+                    ELSE COALESCE(estoque_minimo, 0)
+                 END) - COALESCE(quantidade_full, 0),
+                0
+            )::INTEGER AS quantidade_enviar_calculada,
+            CASE
+                WHEN COALESCE(estoque_minimo, 0) > 0
+                 AND COALESCE(quantidade_full, 0) <= COALESCE(estoque_minimo, 0)
+                THEN 'SIM'
+                ELSE 'NAO'
+            END AS precisa_repor_calculado,
+            ativo_no_relatorio,
+            status
+        FROM anuncios_full
+        ORDER BY quantidade_enviar_calculada DESC, titulo ASC
+    """
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            rows = cur.fetchall()
+    return {"total_linhas": len(rows), "amostra": rows[:20]}
 
 
 if __name__ == "__main__":
