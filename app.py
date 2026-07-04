@@ -6,6 +6,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any
+from decimal import Decimal, InvalidOperation
 from urllib.parse import urlparse, urlunparse
 
 import pandas as pd
@@ -204,6 +205,33 @@ def get_series(df: pd.DataFrame, column: str, default: Any = "") -> pd.Series:
     return pd.Series([default] * len(df), index=df.index)
 
 
+def normalize_for_compare(value: Any, col: str) -> Any:
+    """Normaliza valores antes de comparar importações.
+
+    Evita falsos positivos em campos numéricos vindos do PostgreSQL como Decimal
+    e do Excel como int/float, por exemplo 1.200 vs 1.2 ou 0.000 vs 0.
+    """
+    if value is None:
+        value = 0 if col in NUMERIC_COMPARE_COLS else ""
+
+    if col in INTEGER_COMPARE_COLS:
+        return int_safe(value, 0)
+
+    if col in FLOAT_COMPARE_COLS:
+        try:
+            if isinstance(value, Decimal):
+                return round(float(value), 3)
+            return round(float_safe(value, 0.0), 3)
+        except Exception:
+            return 0.0
+
+    return str(value).strip()
+
+
+INTEGER_COMPARE_COLS = {"quantidade_full", "altura_cm", "largura_cm", "profundidade_cm"}
+FLOAT_COMPARE_COLS = {"preco", "peso_kg"}
+NUMERIC_COMPARE_COLS = INTEGER_COMPARE_COLS | FLOAT_COMPARE_COLS
+
 def read_report(path: Path) -> pd.DataFrame:
     df = pd.read_excel(path, sheet_name="Anúncios", header=0, skiprows=[1, 2, 3, 4])
     df = df.dropna(how="all")
@@ -386,8 +414,12 @@ def importar():
                             ]:
                                 old_val = old.get(col)
                                 new_val = "SIM" if col == "ativo_no_relatorio" else r[col]
-                                if str(old_val) != str(new_val):
-                                    changes[col] = {"antes": old_val, "depois": new_val}
+
+                                old_norm = normalize_for_compare(old_val, col)
+                                new_norm = normalize_for_compare(new_val, col)
+
+                                if old_norm != new_norm:
+                                    changes[col] = {"antes": old_norm, "depois": new_norm}
 
                             if changes:
                                 alterados.append({"codigo_anuncio": codigo, "titulo": r["titulo"], "changes": changes})
