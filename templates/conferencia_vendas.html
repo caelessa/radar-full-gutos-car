@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block content %}
+<h3 class="mb-3">Conferência Estoque Full x Vendas</h3>
+
+<div class="alert alert-secondary" style="max-width: 1100px;">
+  A conferência compara os dois últimos relatórios de anúncios importados com o último relatório de vendas Full.
+  Quando um anúncio some do relatório atual, o sistema considera estoque atual como <strong>0</strong> apenas para a conferência.
+</div>
+
+{% if imports|length < 2 %}
+<div class="alert alert-warning" style="max-width: 900px;">
+  Ainda não existem dois relatórios de anúncios importados com histórico suficiente. Importe pelo menos dois relatórios de anúncios para comparar estoque anterior x atual.
+</div>
+{% elif not venda_import %}
+<div class="alert alert-warning" style="max-width: 900px;">
+  Nenhum relatório de vendas Full foi importado ainda. Importe um relatório de vendas para fazer a conferência.
+</div>
+{% else %}
+<div class="alert alert-primary" style="max-width: 1100px;">
+  <strong>Relatório atual de anúncios:</strong> {{ imports[0].data_importacao_br }} — {{ imports[0].nome_arquivo }}<br>
+  <strong>Relatório anterior de anúncios:</strong> {{ imports[1].data_importacao_br }} — {{ imports[1].nome_arquivo }}<br>
+  <strong>Relatório de vendas usado:</strong> {{ venda_import.data_importacao_br }} — {{ venda_import.nome_arquivo }}
+</div>
+
+{% if resumo %}
+<div class="row g-3 mb-4">
+  <div class="col-md-3"><div class="card metric"><div class="card-body"><small>Itens analisados</small><h3>{{ resumo.total_itens }}</h3></div></div></div>
+  <div class="col-md-3"><div class="card metric"><div class="card-body"><small>Conferência OK</small><h3>{{ resumo.ok }}</h3></div></div></div>
+  <div class="col-md-3"><div class="card metric"><div class="card-body"><small>Divergências</small><h3>{{ resumo.divergencias }}</h3></div></div></div>
+  <div class="col-md-3"><div class="card metric"><div class="card-body"><small>Entradas/reposições</small><h3>{{ resumo.entradas }}</h3></div></div></div>
+</div>
+{% endif %}
+
+<div class="table-responsive">
+<table class="table table-sm table-striped table-hover bg-white">
+  <thead class="table-dark">
+    <tr>
+      <th>Código anúncio</th>
+      <th class="title-col">Produto</th>
+      <th class="text-end">Estoque anterior</th>
+      <th class="text-end">Estoque atual</th>
+      <th>No relatório atual</th>
+      <th class="text-end">Baixa estoque</th>
+      <th class="text-end">Vendido Full</th>
+      <th class="text-end">Diferença</th>
+      <th>Conferência</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in rows %}
+    <tr>
+      <td>{{ r.codigo_anuncio }}</td>
+      <td>{{ r.titulo }}</td>
+      <td class="text-end">{{ r.estoque_anterior }}</td>
+      <td class="text-end">
+        {{ r.estoque_atual_considerado }}
+        {% if r.presente_atual == 'NAO' %}<small class="text-muted">(assumido)</small>{% endif %}
+      </td>
+      <td>
+        {% if r.presente_atual == 'SIM' %}<span class="badge bg-success">SIM</span>{% else %}<span class="badge bg-warning text-dark">NÃO</span>{% endif %}
+      </td>
+      <td class="text-end">{{ r.baixa_estoque }}</td>
+      <td class="text-end">{{ r.vendido_full }}</td>
+      <td class="text-end fw-bold">{{ r.diferenca }}</td>
+      <td>
+        {% if r.conferencia.startswith('OK') %}
+          <span class="badge bg-success">{{ r.conferencia }}</span>
+        {% elif r.conferencia == 'Entrada / reposição no Full' %}
+          <span class="badge bg-primary">{{ r.conferencia }}</span>
+        {% elif r.conferencia == 'Sem alteração' %}
+          <span class="badge bg-secondary">{{ r.conferencia }}</span>
+        {% else %}
+          <span class="badge bg-danger">{{ r.conferencia }}</span>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+{% endblock %}

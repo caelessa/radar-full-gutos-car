@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block content %}
+<h3 class="mb-3">Importar relatório de vendas Full</h3>
+
+<div class="alert alert-secondary" style="max-width: 980px;">
+  Esta tela importa o relatório de vendas e considera somente linhas em que a coluna <strong>Forma de entrega</strong>
+  contenha <strong>Mercado Envios Full</strong>. As vendas importadas serão usadas para cruzar a baixa de estoque
+  dos anúncios com as vendas do período.
+</div>
+
+{% if ultima_venda %}
+<div class="alert alert-primary" style="max-width: 980px;">
+  <strong>Último relatório de vendas:</strong> {{ ultima_venda.data_importacao_br }} — arquivo: <strong>{{ ultima_venda.nome_arquivo }}</strong><br>
+  {{ ultima_venda.total_linhas_full or 0 }} linhas Full · {{ ultima_venda.total_unidades_full or 0 }} unidades vendidas no Full
+</div>
+{% endif %}
+
+<div class="card mb-4" style="max-width: 760px;">
+  <div class="card-body">
+    <form method="post" enctype="multipart/form-data">
+      <div class="mb-3">
+        <label class="form-label">Arquivo Excel de vendas do Mercado Livre</label>
+        <input class="form-control" type="file" name="arquivo" accept=".xlsx,.xls" required>
+      </div>
+      <button class="btn btn-primary">Importar vendas Full</button>
+      <a class="btn btn-outline-secondary" href="{{ url_for('conferencia_vendas') }}">Ver conferência</a>
+    </form>
+  </div>
+</div>
+
+{% if resultado %}
+<div class="alert alert-info" style="max-width: 980px;">
+  Relatório de vendas importado em <strong>{{ resultado.data_importacao }}</strong><br>
+  Arquivo: <strong>{{ resultado.nome_arquivo }}</strong><br>
+  Aba lida: <strong>{{ resultado.sheet }}</strong> · skiprows: <strong>{{ resultado.skiprows }}</strong><br>
+  Linhas totais encontradas: <strong>{{ resultado.total_linhas }}</strong><br>
+  Linhas com Mercado Envios Full: <strong>{{ resultado.total_linhas_full }}</strong><br>
+  Unidades Full vendidas: <strong>{{ resultado.total_unidades_full }}</strong><br>
+  Vendas novas gravadas: <strong>{{ resultado.inseridas }}</strong> · duplicadas ignoradas: <strong>{{ resultado.duplicadas }}</strong>
+</div>
+{% endif %}
+{% endblock %}
