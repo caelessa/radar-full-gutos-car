@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 from decimal import Decimal, InvalidOperation
 from urllib.parse import urlparse, urlunparse
+import unicodedata
 
 import pandas as pd
 import psycopg
@@ -103,6 +104,59 @@ def init_db() -> None:
                 )
                 """
             )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS historico_estoque_full (
+                    id SERIAL PRIMARY KEY,
+                    importacao_id INTEGER,
+                    data_importacao_br TEXT,
+                    codigo_anuncio TEXT NOT NULL,
+                    numero_produto TEXT,
+                    titulo TEXT,
+                    quantidade_full INTEGER DEFAULT 0,
+                    presente_no_relatorio TEXT DEFAULT 'SIM',
+                    status TEXT,
+                    criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_hist_full_importacao ON historico_estoque_full(importacao_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_hist_full_codigo ON historico_estoque_full(codigo_anuncio)")
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS importacoes_vendas_full (
+                    id SERIAL PRIMARY KEY,
+                    data_importacao TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    data_importacao_br TEXT,
+                    nome_arquivo TEXT,
+                    total_linhas INTEGER DEFAULT 0,
+                    total_linhas_full INTEGER DEFAULT 0,
+                    total_unidades_full INTEGER DEFAULT 0,
+                    criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS vendas_full (
+                    id SERIAL PRIMARY KEY,
+                    importacao_id INTEGER,
+                    chave_venda TEXT UNIQUE,
+                    pedido_ml TEXT,
+                    codigo_anuncio TEXT,
+                    numero_produto TEXT,
+                    titulo TEXT,
+                    quantidade INTEGER DEFAULT 0,
+                    data_venda TEXT,
+                    forma_entrega TEXT,
+                    status_venda TEXT,
+                    valor_total NUMERIC(12,2) DEFAULT 0,
+                    criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_vendas_full_importacao ON vendas_full(importacao_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_vendas_full_codigo ON vendas_full(codigo_anuncio)")
             # IMPORTANTE:
             # Não fazemos DROP/ADD das colunas geradas a cada abertura da página.
             # A versão anterior repetia ALTER TABLE em todo acesso e o PostgreSQL
@@ -192,6 +246,43 @@ def get_series(df: pd.DataFrame, column: str, default: Any = "") -> pd.Series:
     return pd.Series([default] * len(df), index=df.index)
 
 
+def normalize_text(value: Any) -> str:
+    if pd.isna(value):
+        return ""
+    text = str(value).strip().lower()
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    return " ".join(text.replace("_", " ").replace("-", " ").split())
+
+
+def norm_col_name(value: Any) -> str:
+    return normalize_text(value).replace(" ", "")
+
+
+def find_column(df: pd.DataFrame, aliases: list[str]) -> str | None:
+    normalized = {norm_col_name(c): c for c in df.columns}
+    for alias in aliases:
+        key = norm_col_name(alias)
+        if key in normalized:
+            return normalized[key]
+    # busca parcial segura
+    for alias in aliases:
+        key = norm_col_name(alias)
+        for ncol, original in normalized.items():
+            if key and key in ncol:
+                return original
+    return None
+
+
+def only_digits_or_text(value: Any) -> str:
+    if pd.isna(value):
+        return ""
+    text = str(value).strip()
+    if text.endswith(".0"):
+        text = text[:-2]
+    return text
+
+
 def normalize_for_compare(value: Any, col: str) -> Any:
     """Normaliza valores antes de comparar importações.
 
@@ -248,6 +339,86 @@ def read_report(path: Path) -> pd.DataFrame:
     out = out[out["codigo_anuncio"].str.startswith("MLB")].copy()
     out = out.drop_duplicates(subset=["codigo_anuncio"], keep="last")
     return out
+
+
+def read_sales_report(path: Path) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Lê relatório de vendas do Mercado Livre e mantém somente Mercado Envios Full.
+
+    A função é flexível com nomes de colunas, porque o Mercado Livre muda
+    bastante a nomenclatura conforme o relatório exportado. O campo obrigatório
+    para filtrar é a forma de entrega contendo "Mercado Envios Full".
+    """
+    xls = pd.ExcelFile(path)
+    attempts: list[str] = []
+
+    aliases = {
+        "pedido_ml": ["ORDER_ID", "order_id", "Pedido", "Nº de pedido", "Numero do pedido", "Número do pedido", "Venda", "Nº de venda", "Numero da venda", "Número da venda"],
+        "codigo_anuncio": ["ITEM_ID", "item_id", "Código do anúncio", "Codigo do anuncio", "ID do anúncio", "Id do anuncio", "Anúncio", "Anuncio", "MLB"],
+        "numero_produto": ["PRODUCT_NUMBER", "SKU", "Código SKU", "Codigo SKU", "SKU vendedor", "Código do vendedor", "Codigo do vendedor"],
+        "titulo": ["TITLE", "Título", "Titulo", "Produto", "Descrição", "Descricao", "Anúncio", "Anuncio"],
+        "quantidade": ["QUANTITY", "Quantidade", "Qtd", "Unidades", "Unidades vendidas", "Quantidade vendida"],
+        "data_venda": ["DATE_CREATED", "Data da venda", "Data", "Data de venda", "Data do pedido", "Data de criação", "Data de criacao"],
+        "forma_entrega": ["SHIPPING_METHOD", "Forma de entrega", "Forma de envio", "Tipo de envio", "Envio", "Logística", "Logistica", "Método de envio", "Metodo de envio"],
+        "status_venda": ["STATUS", "Status", "Status da venda", "Situação", "Situacao"],
+        "valor_total": ["TOTAL_AMOUNT", "Valor total", "Total", "Preço", "Preco", "Valor", "Receita"],
+    }
+
+    for sheet in xls.sheet_names:
+        for skip in range(0, 8):
+            try:
+                df = pd.read_excel(path, sheet_name=sheet, header=0, skiprows=skip)
+                df = df.dropna(how="all")
+                if df.empty:
+                    continue
+
+                cols = {field: find_column(df, names) for field, names in aliases.items()}
+                attempts.append(f"{sheet} skip {skip}: {list(df.columns)[:12]}")
+
+                if not cols["forma_entrega"]:
+                    continue
+                if not (cols["codigo_anuncio"] or cols["numero_produto"] or cols["titulo"]):
+                    continue
+
+                out = pd.DataFrame()
+                out["pedido_ml"] = get_series(df, cols["pedido_ml"], "").apply(only_digits_or_text) if cols["pedido_ml"] else ""
+                out["codigo_anuncio"] = get_series(df, cols["codigo_anuncio"], "").fillna("").astype(str).str.strip() if cols["codigo_anuncio"] else ""
+                out["numero_produto"] = get_series(df, cols["numero_produto"], "").fillna("").astype(str).str.strip() if cols["numero_produto"] else ""
+                out["titulo"] = get_series(df, cols["titulo"], "").fillna("").astype(str).str.strip() if cols["titulo"] else ""
+                out["quantidade"] = get_series(df, cols["quantidade"], 1).apply(lambda x: max(int_safe(x, 1), 1)) if cols["quantidade"] else 1
+                out["data_venda"] = get_series(df, cols["data_venda"], "").fillna("").astype(str).str.strip() if cols["data_venda"] else ""
+                out["forma_entrega"] = get_series(df, cols["forma_entrega"], "").fillna("").astype(str).str.strip()
+                out["status_venda"] = get_series(df, cols["status_venda"], "").fillna("").astype(str).str.strip() if cols["status_venda"] else ""
+                out["valor_total"] = get_series(df, cols["valor_total"], 0).apply(float_safe) if cols["valor_total"] else 0
+
+                # Normaliza códigos MLB quando vêm junto de texto.
+                out["codigo_anuncio"] = out["codigo_anuncio"].str.extract(r"(MLB\d+)", expand=False).fillna(out["codigo_anuncio"])
+                full_mask = out["forma_entrega"].apply(lambda v: "mercado envios full" in normalize_text(v))
+                out_full = out[full_mask].copy()
+                out_full = out_full[(out_full["codigo_anuncio"].astype(str).str.strip() != "") | (out_full["numero_produto"].astype(str).str.strip() != "") | (out_full["titulo"].astype(str).str.strip() != "")]
+
+                meta = {
+                    "sheet": sheet,
+                    "skiprows": skip,
+                    "columns": cols,
+                    "total_linhas": int(len(out)),
+                    "total_linhas_full": int(len(out_full)),
+                }
+                return out_full, meta
+            except Exception as exc:
+                attempts.append(f"{sheet} skip {skip}: {exc}")
+
+    raise ValueError("Não consegui identificar o relatório de vendas. Verifique se existe uma coluna de Forma de entrega com Mercado Envios Full. Tentativas: " + " | ".join(attempts[-5:]))
+
+
+def make_sale_key(row: pd.Series) -> str:
+    return "|".join([
+        str(row.get("pedido_ml", "")).strip(),
+        str(row.get("codigo_anuncio", "")).strip(),
+        str(row.get("numero_produto", "")).strip(),
+        str(row.get("data_venda", "")).strip(),
+        str(row.get("quantidade", "")).strip(),
+        str(row.get("valor_total", "")).strip(),
+    ])
 
 
 @app.route("/")
@@ -466,8 +637,21 @@ def importar():
                             data_importacao, data_importacao_br, nome_arquivo, total_relatorio,
                             qtd_novos, qtd_alterados, qtd_ausentes
                         ) VALUES (CURRENT_TIMESTAMP, %s, %s, %s, %s, %s, %s)
+                        RETURNING id
                         """,
                         (import_time, file.filename, int(len(df_new)), len(novos), len(alterados), len(ausentes)),
+                    )
+                    importacao_id = cur.fetchone()["id"]
+                    cur.execute(
+                        """
+                        INSERT INTO historico_estoque_full (
+                            importacao_id, data_importacao_br, codigo_anuncio, numero_produto, titulo,
+                            quantidade_full, presente_no_relatorio, status
+                        )
+                        SELECT %s, %s, codigo_anuncio, numero_produto, titulo, quantidade_full, ativo_no_relatorio, status
+                        FROM anuncios_full
+                        """,
+                        (importacao_id, import_time),
                     )
 
                 conn.commit()
@@ -486,6 +670,185 @@ def importar():
             flash(f"Erro ao importar relatório: {e}", "danger")
 
     return render_template("importar.html", resultado=resultado)
+
+
+@app.route("/importar-vendas", methods=["GET", "POST"])
+def importar_vendas():
+    init_db()
+    resultado = None
+    if request.method == "POST":
+        file = request.files.get("arquivo")
+        if not file or not file.filename:
+            flash("Selecione um arquivo Excel de vendas.", "warning")
+            return redirect(url_for("importar_vendas"))
+
+        filename = f"vendas_{agora_brasil().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        path = UPLOAD_DIR / filename
+        file.save(path)
+
+        try:
+            df_sales, meta = read_sales_report(path)
+            import_time = agora_brasil_str()
+            total_unidades_full = int(df_sales["quantidade"].sum()) if not df_sales.empty else 0
+            inseridas = 0
+            duplicadas = 0
+
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO importacoes_vendas_full (
+                            data_importacao, data_importacao_br, nome_arquivo, total_linhas,
+                            total_linhas_full, total_unidades_full
+                        ) VALUES (CURRENT_TIMESTAMP, %s, %s, %s, %s, %s)
+                        RETURNING id
+                        """,
+                        (import_time, file.filename, int(meta.get("total_linhas", 0)), int(len(df_sales)), total_unidades_full),
+                    )
+                    importacao_id = cur.fetchone()["id"]
+
+                    for _, r in df_sales.iterrows():
+                        chave = make_sale_key(r)
+                        cur.execute(
+                            """
+                            INSERT INTO vendas_full (
+                                importacao_id, chave_venda, pedido_ml, codigo_anuncio, numero_produto, titulo,
+                                quantidade, data_venda, forma_entrega, status_venda, valor_total
+                            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            ON CONFLICT (chave_venda) DO NOTHING
+                            RETURNING id
+                            """,
+                            (
+                                importacao_id, chave, r.get("pedido_ml"), r.get("codigo_anuncio"), r.get("numero_produto"),
+                                r.get("titulo"), int(r.get("quantidade") or 0), r.get("data_venda"), r.get("forma_entrega"),
+                                r.get("status_venda"), float(r.get("valor_total") or 0),
+                            ),
+                        )
+                        if cur.fetchone():
+                            inseridas += 1
+                        else:
+                            duplicadas += 1
+                conn.commit()
+
+            resultado = {
+                "data_importacao": import_time,
+                "nome_arquivo": file.filename,
+                "total_linhas": int(meta.get("total_linhas", 0)),
+                "total_linhas_full": int(len(df_sales)),
+                "total_unidades_full": total_unidades_full,
+                "inseridas": inseridas,
+                "duplicadas": duplicadas,
+                "sheet": meta.get("sheet"),
+                "skiprows": meta.get("skiprows"),
+            }
+            flash("Relatório de vendas Full importado com sucesso.", "success")
+        except Exception as e:
+            flash(f"Erro ao importar relatório de vendas: {e}", "danger")
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT data_importacao_br, nome_arquivo, total_linhas_full, total_unidades_full
+                FROM importacoes_vendas_full
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            )
+            ultima_venda = cur.fetchone()
+    return render_template("importar_vendas.html", resultado=resultado, ultima_venda=ultima_venda)
+
+
+@app.route("/conferencia-vendas")
+def conferencia_vendas():
+    init_db()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, data_importacao_br, nome_arquivo FROM importacoes_relatorios ORDER BY id DESC LIMIT 2")
+            imports = cur.fetchall()
+            cur.execute("SELECT id, data_importacao_br, nome_arquivo, total_linhas_full, total_unidades_full FROM importacoes_vendas_full ORDER BY id DESC LIMIT 1")
+            venda_import = cur.fetchone()
+
+            if len(imports) < 2 or not venda_import:
+                return render_template("conferencia_vendas.html", rows=[], imports=imports, venda_import=venda_import, resumo=None)
+
+            atual_id = imports[0]["id"]
+            anterior_id = imports[1]["id"]
+            venda_id = venda_import["id"]
+
+            cur.execute(
+                """
+                WITH anterior AS (
+                    SELECT codigo_anuncio, titulo, quantidade_full AS estoque_anterior, presente_no_relatorio AS presente_anterior
+                    FROM historico_estoque_full
+                    WHERE importacao_id = %s
+                ),
+                atual AS (
+                    SELECT codigo_anuncio, titulo, quantidade_full AS estoque_atual_raw, presente_no_relatorio AS presente_atual
+                    FROM historico_estoque_full
+                    WHERE importacao_id = %s
+                ),
+                vendas AS (
+                    SELECT codigo_anuncio, SUM(COALESCE(quantidade,0))::INTEGER AS vendido_full
+                    FROM vendas_full
+                    WHERE importacao_id = %s
+                    GROUP BY codigo_anuncio
+                ),
+                base AS (
+                    SELECT
+                        COALESCE(a.codigo_anuncio, at.codigo_anuncio, v.codigo_anuncio) AS codigo_anuncio,
+                        COALESCE(at.titulo, a.titulo, '') AS titulo,
+                        COALESCE(a.estoque_anterior, 0)::INTEGER AS estoque_anterior,
+                        COALESCE(at.estoque_atual_raw, 0)::INTEGER AS estoque_atual_raw,
+                        COALESCE(at.presente_atual, 'NAO') AS presente_atual,
+                        COALESCE(v.vendido_full, 0)::INTEGER AS vendido_full
+                    FROM anterior a
+                    FULL OUTER JOIN atual at ON at.codigo_anuncio = a.codigo_anuncio
+                    FULL OUTER JOIN vendas v ON v.codigo_anuncio = COALESCE(a.codigo_anuncio, at.codigo_anuncio)
+                ),
+                calc AS (
+                    SELECT *,
+                        CASE WHEN presente_atual = 'NAO' THEN 0 ELSE estoque_atual_raw END AS estoque_atual_considerado
+                    FROM base
+                )
+                SELECT
+                    codigo_anuncio, titulo, estoque_anterior, estoque_atual_raw, presente_atual,
+                    estoque_atual_considerado,
+                    GREATEST(estoque_anterior - estoque_atual_considerado, 0)::INTEGER AS baixa_estoque,
+                    vendido_full,
+                    (GREATEST(estoque_anterior - estoque_atual_considerado, 0) - vendido_full)::INTEGER AS diferenca,
+                    CASE
+                        WHEN presente_atual = 'NAO' AND estoque_anterior > 0 AND vendido_full = estoque_anterior THEN 'OK - zerou e saiu do relatório'
+                        WHEN GREATEST(estoque_anterior - estoque_atual_considerado, 0) = vendido_full AND vendido_full > 0 THEN 'OK'
+                        WHEN estoque_atual_considerado > estoque_anterior THEN 'Entrada / reposição no Full'
+                        WHEN vendido_full = 0 AND GREATEST(estoque_anterior - estoque_atual_considerado, 0) > 0 THEN 'Baixa sem venda no relatório'
+                        WHEN vendido_full > GREATEST(estoque_anterior - estoque_atual_considerado, 0) THEN 'Venda maior que baixa'
+                        WHEN vendido_full < GREATEST(estoque_anterior - estoque_atual_considerado, 0) THEN 'Baixa maior que vendas'
+                        ELSE 'Sem alteração'
+                    END AS conferencia
+                FROM calc
+                WHERE vendido_full > 0
+                   OR estoque_anterior <> estoque_atual_considerado
+                   OR presente_atual = 'NAO'
+                ORDER BY
+                    CASE
+                        WHEN GREATEST(estoque_anterior - estoque_atual_considerado, 0) = vendido_full THEN 2
+                        ELSE 1
+                    END,
+                    ABS(GREATEST(estoque_anterior - estoque_atual_considerado, 0) - vendido_full) DESC,
+                    titulo ASC
+                """,
+                (anterior_id, atual_id, venda_id),
+            )
+            rows = cur.fetchall()
+
+    resumo = {
+        "total_itens": len(rows),
+        "ok": sum(1 for r in rows if str(r.get("conferencia", "")).startswith("OK")),
+        "divergencias": sum(1 for r in rows if not str(r.get("conferencia", "")).startswith("OK") and r.get("conferencia") != "Entrada / reposição no Full" and r.get("conferencia") != "Sem alteração"),
+        "entradas": sum(1 for r in rows if r.get("conferencia") == "Entrada / reposição no Full"),
+    }
+    return render_template("conferencia_vendas.html", rows=rows, imports=imports, venda_import=venda_import, resumo=resumo)
 
 
 @app.route("/exportar")
