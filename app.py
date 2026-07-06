@@ -823,8 +823,15 @@ def exportar_configuracao():
         FROM anuncios_full
         ORDER BY ativo_no_relatorio DESC, titulo ASC
     """
+    # Não usar pd.read_sql_query aqui porque a conexão usa row_factory=dict_row (psycopg3).
+    # Com read_sql_query, o pandas pode interpretar as chaves do dicionário como valores
+    # e gerar uma planilha com os nomes das colunas repetidos em todas as linhas.
     with get_conn() as conn:
-        df = pd.read_sql_query(sql, conn)
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            rows = cur.fetchall()
+
+    df = pd.DataFrame(rows)
 
     with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="Configuração")
