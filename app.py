@@ -48,55 +48,131 @@ def get_conn():
     return psycopg.connect(normalize_database_url(database_url), row_factory=dict_row)
 
 
+
+ANUNCIOS_FULL_SCHEMA_COLUMNS = [
+    ("id", "SERIAL PRIMARY KEY"),
+    ("codigo_anuncio", "TEXT NOT NULL UNIQUE"),
+    ("numero_produto", "TEXT"),
+    ("titulo", "TEXT"),
+    ("variacoes", "TEXT"),
+    ("quantidade_full", "INTEGER NOT NULL DEFAULT 0"),
+    ("preco", "NUMERIC(12,2) NOT NULL DEFAULT 0"),
+    ("moeda", "TEXT"),
+    ("condicao", "TEXT"),
+    ("forma_entrega", "TEXT"),
+    ("tipo_anuncio", "TEXT"),
+    ("status", "TEXT"),
+    ("altura_cm", "INTEGER DEFAULT 0"),
+    ("largura_cm", "INTEGER DEFAULT 0"),
+    ("profundidade_cm", "INTEGER DEFAULT 0"),
+    ("peso_kg", "NUMERIC(12,3) DEFAULT 0"),
+    ("estoque_minimo", "INTEGER NOT NULL DEFAULT 0"),
+    ("estoque_recomendado", "INTEGER NOT NULL DEFAULT 0"),
+    ("quantidade_enviar_full", "INTEGER GENERATED ALWAYS AS (GREATEST((CASE WHEN estoque_recomendado > 0 THEN estoque_recomendado ELSE estoque_minimo END) - quantidade_full, 0)) STORED"),
+    ("precisa_repor", "TEXT GENERATED ALWAYS AS (CASE WHEN estoque_minimo > 0 AND quantidade_full <= estoque_minimo THEN 'SIM' ELSE 'NAO' END) STORED"),
+    ("criado_em", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
+    ("atualizado_em", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
+    ("ativo_no_relatorio", "TEXT DEFAULT 'SIM'"),
+    ("data_ultima_importacao", "TEXT"),
+    ("data_primeira_importacao", "TEXT"),
+    ("observacao", "TEXT"),
+    ("custo_produto", "NUMERIC(12,2) NOT NULL DEFAULT 0"),
+    ("custo_mercado_livre", "NUMERIC(12,2) NOT NULL DEFAULT 0"),
+    ("custo_impostos", "NUMERIC(12,2) NOT NULL DEFAULT 0"),
+]
+
+BASE_COPY_COLUMNS = [
+    "codigo_anuncio", "numero_produto", "titulo", "variacoes", "quantidade_full", "preco", "moeda", "condicao",
+    "forma_entrega", "tipo_anuncio", "status", "altura_cm", "largura_cm", "profundidade_cm", "peso_kg",
+    "estoque_minimo", "estoque_recomendado", "criado_em", "atualizado_em", "ativo_no_relatorio",
+    "data_ultima_importacao", "data_primeira_importacao", "observacao", "custo_produto", "custo_mercado_livre", "custo_impostos"
+]
+
+
+def get_existing_columns(cur, table_name: str = "anuncios_full") -> set[str]:
+    cur.execute(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = %s
+        """,
+        (table_name,),
+    )
+    return {row["column_name"] for row in cur.fetchall()}
+
+
+def create_anuncios_full_table(cur, table_name: str = "anuncios_full") -> None:
+    cols_sql = ",\n                    ".join(f"{name} {definition}" for name, definition in ANUNCIOS_FULL_SCHEMA_COLUMNS)
+    cur.execute(f"CREATE TABLE IF NOT EXISTS {table_name} (\n                    {cols_sql}\n                )")
+
+
+def rebuild_anuncios_full_table(cur) -> None:
+    """Reconstrói anuncios_full para limpar metadados internos acumulados no PostgreSQL.
+
+    A versão antiga fez muitos DROP/ADD COLUMN de colunas geradas, e o PostgreSQL mantém
+    colunas removidas internamente. Quando o limite interno de 1600 colunas é atingido,
+    qualquer ALTER TABLE falha. Esta função cria uma tabela limpa, copia os dados úteis,
+    renomeia a antiga como backup e coloca a nova no lugar.
+    """
+    existing = get_existing_columns(cur, "anuncios_full")
+    backup_name = "anuncios_full_backup_" + datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    new_name = "anuncios_full_reparada"
+
+    cur.execute(f"DROP TABLE IF EXISTS {new_name}")
+    create_anuncios_full_table(cur, new_name)
+
+    insert_cols = [c for c in BASE_COPY_COLUMNS if c in [name for name, _ in ANUNCIOS_FULL_SCHEMA_COLUMNS]]
+    select_exprs = []
+    for col in insert_cols:
+        if col in existing:
+            select_exprs.append(col)
+        else:
+            if col in {"quantidade_full", "altura_cm", "largura_cm", "profundidade_cm", "estoque_minimo", "estoque_recomendado"}:
+                select_exprs.append(f"0 AS {col}")
+            elif col in {"preco", "peso_kg", "custo_produto", "custo_mercado_livre", "custo_impostos"}:
+                select_exprs.append(f"0 AS {col}")
+            elif col == "ativo_no_relatorio":
+                select_exprs.append("'SIM' AS ativo_no_relatorio")
+            elif col in {"criado_em", "atualizado_em"}:
+                select_exprs.append(f"CURRENT_TIMESTAMP AS {col}")
+            else:
+                select_exprs.append(f"NULL AS {col}")
+
+    # codigo_anuncio é obrigatório; só copia linhas válidas.
+    cur.execute(
+        f"""
+        INSERT INTO {new_name} ({', '.join(insert_cols)})
+        SELECT {', '.join(select_exprs)}
+        FROM anuncios_full
+        WHERE codigo_anuncio IS NOT NULL AND codigo_anuncio <> ''
+        ON CONFLICT (codigo_anuncio) DO NOTHING
+        """
+    )
+
+    cur.execute(f"ALTER TABLE anuncios_full RENAME TO {backup_name}")
+    cur.execute(f"ALTER TABLE {new_name} RENAME TO anuncios_full")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_anuncios_full_ativo ON anuncios_full(ativo_no_relatorio)")
+
+
+def ensure_anuncios_columns(cur) -> None:
+    required = {"observacao", "custo_produto", "custo_mercado_livre", "custo_impostos"}
+    existing = get_existing_columns(cur, "anuncios_full")
+    missing = required - existing
+    if not missing:
+        return
+
+    # Se faltam colunas novas, preferimos reconstruir a tabela em vez de executar ALTER TABLE.
+    # Isso evita o erro TooManyColumns em bancos que já acumularam metadados internos.
+    rebuild_anuncios_full_table(cur)
+
+
 def init_db() -> None:
     """Cria a tabela no PostgreSQL e carrega o banco seed SQLite se estiver vazio."""
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS anuncios_full (
-                    id SERIAL PRIMARY KEY,
-                    codigo_anuncio TEXT NOT NULL UNIQUE,
-                    numero_produto TEXT,
-                    titulo TEXT,
-                    variacoes TEXT,
-                    quantidade_full INTEGER NOT NULL DEFAULT 0,
-                    preco NUMERIC(12,2) NOT NULL DEFAULT 0,
-                    moeda TEXT,
-                    condicao TEXT,
-                    forma_entrega TEXT,
-                    tipo_anuncio TEXT,
-                    status TEXT,
-                    altura_cm INTEGER DEFAULT 0,
-                    largura_cm INTEGER DEFAULT 0,
-                    profundidade_cm INTEGER DEFAULT 0,
-                    peso_kg NUMERIC(12,3) DEFAULT 0,
-                    estoque_minimo INTEGER NOT NULL DEFAULT 0,
-                    estoque_recomendado INTEGER NOT NULL DEFAULT 0,
-                    quantidade_enviar_full INTEGER GENERATED ALWAYS AS (
-                        GREATEST((CASE WHEN estoque_recomendado > 0 THEN estoque_recomendado ELSE estoque_minimo END) - quantidade_full, 0)
-                    ) STORED,
-                    precisa_repor TEXT GENERATED ALWAYS AS (
-                        CASE WHEN estoque_minimo > 0 AND quantidade_full <= estoque_minimo THEN 'SIM' ELSE 'NAO' END
-                    ) STORED,
-                    criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    ativo_no_relatorio TEXT DEFAULT 'SIM',
-                    data_ultima_importacao TEXT,
-                    data_primeira_importacao TEXT,
-                    observacao TEXT,
-                    custo_produto NUMERIC(12,2) NOT NULL DEFAULT 0,
-                    custo_mercado_livre NUMERIC(12,2) NOT NULL DEFAULT 0,
-                    custo_impostos NUMERIC(12,2) NOT NULL DEFAULT 0
-                )
-                """
-            )
+            create_anuncios_full_table(cur, "anuncios_full")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_anuncios_full_ativo ON anuncios_full(ativo_no_relatorio)")
-            # Garante que bancos PostgreSQL já existentes recebam novas colunas editáveis.
-            cur.execute("ALTER TABLE anuncios_full ADD COLUMN IF NOT EXISTS observacao TEXT")
-            cur.execute("ALTER TABLE anuncios_full ADD COLUMN IF NOT EXISTS custo_produto NUMERIC(12,2) NOT NULL DEFAULT 0")
-            cur.execute("ALTER TABLE anuncios_full ADD COLUMN IF NOT EXISTS custo_mercado_livre NUMERIC(12,2) NOT NULL DEFAULT 0")
-            cur.execute("ALTER TABLE anuncios_full ADD COLUMN IF NOT EXISTS custo_impostos NUMERIC(12,2) NOT NULL DEFAULT 0")
+            ensure_anuncios_columns(cur)
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS importacoes_relatorios (
