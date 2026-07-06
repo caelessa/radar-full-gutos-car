@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block content %}
+<h3 class="mb-3">Importar configuração em lote</h3>
+
+<div class="alert alert-primary" style="max-width: 980px;">
+  Primeiro baixe a <a href="{{ url_for('exportar_configuracao') }}" class="alert-link">planilha de configuração</a>, preencha as colunas editáveis e importe aqui.
+  <br>Campos aceitos: <strong>ESTOQUE_MINIMO</strong>, <strong>ESTOQUE_RECOMENDADO</strong>, <strong>OBSERVACAO</strong>, <strong>CUSTO_PRODUTO</strong>, <strong>CUSTO_MERCADO_LIVRE</strong> e <strong>CUSTO_IMPOSTOS</strong>.
+  <br>Células em branco mantêm o valor antigo salvo no banco.
+</div>
+
+<div class="card mb-4" style="max-width: 760px;">
+  <div class="card-body">
+    <form method="post" enctype="multipart/form-data">
+      <div class="mb-3">
+        <label class="form-label">Planilha de configuração preenchida</label>
+        <input class="form-control" type="file" name="arquivo" accept=".xlsx,.xls" required>
+      </div>
+      <button class="btn btn-primary">Importar configuração</button>
+      <a class="btn btn-outline-secondary" href="{{ url_for('exportar_configuracao') }}">Baixar modelo atual</a>
+    </form>
+  </div>
+</div>
+
+{% if resultado %}
+<div class="alert alert-info">
+  Arquivo: <strong>{{ resultado.arquivo }}</strong><br>
+  Anúncios atualizados: <strong>{{ resultado.atualizados|length }}</strong><br>
+  Sem alteração: <strong>{{ resultado.sem_alteracao }}</strong><br>
+  Códigos ignorados/não encontrados: <strong>{{ resultado.ignorados|length }}</strong>
+</div>
+
+{% if resultado.atualizados %}
+<h5>Atualizados</h5>
+<div class="table-responsive mb-4">
+<table class="table table-sm table-striped bg-white">
+  <thead><tr><th>Código anúncio</th></tr></thead>
+  <tbody>
+    {% for codigo in resultado.atualizados %}<tr><td>{{ codigo }}</td></tr>{% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+
+{% if resultado.ignorados %}
+<h5>Ignorados/não encontrados</h5>
+<ul>
+  {% for codigo in resultado.ignorados %}<li>{{ codigo }}</li>{% endfor %}
+</ul>
+{% endif %}
+{% endif %}
+{% endblock %}
