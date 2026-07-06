@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 from decimal import Decimal, InvalidOperation
 from urllib.parse import urlparse, urlunparse
+import unicodedata
 
 import pandas as pd
 import psycopg
@@ -83,11 +84,19 @@ def init_db() -> None:
                     ativo_no_relatorio TEXT DEFAULT 'SIM',
                     data_ultima_importacao TEXT,
                     data_primeira_importacao TEXT,
-                    observacao TEXT
+                    observacao TEXT,
+                    custo_produto NUMERIC(12,2) NOT NULL DEFAULT 0,
+                    custo_mercado_livre NUMERIC(12,2) NOT NULL DEFAULT 0,
+                    custo_impostos NUMERIC(12,2) NOT NULL DEFAULT 0
                 )
                 """
             )
             cur.execute("CREATE INDEX IF NOT EXISTS idx_anuncios_full_ativo ON anuncios_full(ativo_no_relatorio)")
+            # Garante que bancos PostgreSQL já existentes recebam novas colunas editáveis.
+            cur.execute("ALTER TABLE anuncios_full ADD COLUMN IF NOT EXISTS observacao TEXT")
+            cur.execute("ALTER TABLE anuncios_full ADD COLUMN IF NOT EXISTS custo_produto NUMERIC(12,2) NOT NULL DEFAULT 0")
+            cur.execute("ALTER TABLE anuncios_full ADD COLUMN IF NOT EXISTS custo_mercado_livre NUMERIC(12,2) NOT NULL DEFAULT 0")
+            cur.execute("ALTER TABLE anuncios_full ADD COLUMN IF NOT EXISTS custo_impostos NUMERIC(12,2) NOT NULL DEFAULT 0")
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS importacoes_relatorios (
@@ -140,8 +149,9 @@ def seed_from_sqlite() -> None:
                         codigo_anuncio, numero_produto, titulo, variacoes, quantidade_full, preco, moeda, condicao,
                         forma_entrega, tipo_anuncio, status, altura_cm, largura_cm, profundidade_cm, peso_kg,
                         estoque_minimo, estoque_recomendado, ativo_no_relatorio,
-                        data_primeira_importacao, data_ultima_importacao, observacao
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        data_primeira_importacao, data_ultima_importacao, observacao,
+                        custo_produto, custo_mercado_livre, custo_impostos
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (codigo_anuncio) DO NOTHING
                     """,
                     (
@@ -152,6 +162,8 @@ def seed_from_sqlite() -> None:
                         float(r.get("peso_kg") or 0), int(r.get("estoque_minimo") or 0),
                         int(r.get("estoque_recomendado") or 0), r.get("ativo_no_relatorio") or "SIM",
                         r.get("data_primeira_importacao"), r.get("data_ultima_importacao"), r.get("observacao"),
+                        float(r.get("custo_produto") or 0), float(r.get("custo_mercado_livre") or 0),
+                        float(r.get("custo_impostos") or 0),
                     ),
                 )
         conn.commit()
@@ -192,6 +204,102 @@ def get_series(df: pd.DataFrame, column: str, default: Any = "") -> pd.Series:
     return pd.Series([default] * len(df), index=df.index)
 
 
+EDITABLE_COLUMNS = [
+    "estoque_minimo",
+    "estoque_recomendado",
+    "observacao",
+    "custo_produto",
+    "custo_mercado_livre",
+    "custo_impostos",
+]
+
+EDITABLE_ALIASES = {
+    "estoque_minimo": ["ESTOQUE_MINIMO", "ESTOQUE MINIMO", "ESTOQUE MÍNIMO", "MINIMO", "MÍNIMO"],
+    "estoque_recomendado": ["ESTOQUE_RECOMENDADO", "ESTOQUE RECOMENDADO", "RECOMENDADO"],
+    "observacao": ["OBSERVACAO", "OBSERVAÇÃO", "OBSERVACOES", "OBSERVAÇÕES", "OBS"],
+    "custo_produto": ["CUSTO_PRODUTO", "CUSTO PRODUTO", "CUSTO DO PRODUTO"],
+    "custo_mercado_livre": ["CUSTO_MERCADO_LIVRE", "CUSTO MERCADO LIVRE", "CUSTO ML", "TAXA ML", "TAXA MERCADO LIVRE"],
+    "custo_impostos": ["CUSTO_IMPOSTOS", "CUSTO IMPOSTOS", "IMPOSTOS", "CUSTO IMPOSTO"],
+}
+
+
+def normalize_header(value: Any) -> str:
+    text = str(value or "").strip().upper()
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    for ch in ["_", "-", ".", "/", "\\", "\n", "\r", "\t"]:
+        text = text.replace(ch, " ")
+    return " ".join(text.split())
+
+
+def find_column(df: pd.DataFrame, aliases: list[str]) -> str | None:
+    normalized = {normalize_header(c): c for c in df.columns}
+    for alias in aliases:
+        key = normalize_header(alias)
+        if key in normalized:
+            return normalized[key]
+    return None
+
+
+def is_blank(value: Any) -> bool:
+    if pd.isna(value):
+        return True
+    return str(value).strip() == ""
+
+
+def optional_int(value: Any) -> int | None:
+    if is_blank(value):
+        return None
+    return int_safe(value, 0)
+
+
+def optional_float(value: Any) -> float | None:
+    if is_blank(value):
+        return None
+    return float_safe(value, 0.0)
+
+
+def optional_text(value: Any) -> str | None:
+    if is_blank(value):
+        return None
+    return str(value).strip()
+
+
+def extract_editable_values(df: pd.DataFrame, row_index: Any) -> dict[str, Any]:
+    """Lê colunas editáveis opcionais de uma linha de Excel.
+
+    Regra: célula em branco mantém o valor existente no banco.
+    Se a coluna não existir, também mantém o valor existente.
+    """
+    values: dict[str, Any] = {}
+    for canonical in EDITABLE_COLUMNS:
+        col = find_column(df, EDITABLE_ALIASES[canonical])
+        if not col:
+            values[canonical] = None
+            continue
+        raw = df.at[row_index, col]
+        if canonical in {"estoque_minimo", "estoque_recomendado"}:
+            values[canonical] = optional_int(raw)
+        elif canonical in {"custo_produto", "custo_mercado_livre", "custo_impostos"}:
+            values[canonical] = optional_float(raw)
+        else:
+            values[canonical] = optional_text(raw)
+    return values
+
+
+def merge_editable(old: dict | None, imported: dict[str, Any]) -> dict[str, Any]:
+    merged = {}
+    for col in EDITABLE_COLUMNS:
+        default = "" if col == "observacao" else 0
+        current = old.get(col, default) if old else default
+        merged[col] = imported[col] if imported.get(col) is not None else current
+        if col != "observacao":
+            merged[col] = float(merged[col] or 0) if col.startswith("custo_") else int(merged[col] or 0)
+        else:
+            merged[col] = merged[col] or ""
+    return merged
+
+
 def normalize_for_compare(value: Any, col: str) -> Any:
     """Normaliza valores antes de comparar importações.
 
@@ -215,8 +323,8 @@ def normalize_for_compare(value: Any, col: str) -> Any:
     return str(value).strip()
 
 
-INTEGER_COMPARE_COLS = {"quantidade_full", "altura_cm", "largura_cm", "profundidade_cm"}
-FLOAT_COMPARE_COLS = {"preco", "peso_kg"}
+INTEGER_COMPARE_COLS = {"quantidade_full", "altura_cm", "largura_cm", "profundidade_cm", "estoque_minimo", "estoque_recomendado"}
+FLOAT_COMPARE_COLS = {"preco", "peso_kg", "custo_produto", "custo_mercado_livre", "custo_impostos"}
 NUMERIC_COMPARE_COLS = INTEGER_COMPARE_COLS | FLOAT_COMPARE_COLS
 
 def read_report(path: Path) -> pd.DataFrame:
@@ -244,6 +352,23 @@ def read_report(path: Path) -> pd.DataFrame:
     out["largura_cm"] = get_series(df, "SHIPPING_WIDTH", 0).apply(int_safe)
     out["profundidade_cm"] = get_series(df, "SHIPPING_DEPTH", 0).apply(int_safe)
     out["peso_kg"] = get_series(df, "SHIPPING_WEIGHT", 0).apply(float_safe)
+
+    # Colunas editáveis opcionais que podem ser digitadas na própria planilha de anúncios.
+    for canonical in EDITABLE_COLUMNS:
+        values = []
+        col = find_column(df, EDITABLE_ALIASES[canonical])
+        for idx in df.index:
+            if not col:
+                values.append(None)
+                continue
+            raw = df.at[idx, col]
+            if canonical in {"estoque_minimo", "estoque_recomendado"}:
+                values.append(optional_int(raw))
+            elif canonical in {"custo_produto", "custo_mercado_livre", "custo_impostos"}:
+                values.append(optional_float(raw))
+            else:
+                values.append(optional_text(raw))
+        out[canonical] = values
 
     out = out[out["codigo_anuncio"].str.startswith("MLB")].copy()
     out = out.drop_duplicates(subset=["codigo_anuncio"], keep="last")
@@ -340,16 +465,22 @@ def produto(produto_id: int):
                 estoque_minimo = int_safe(request.form.get("estoque_minimo"), 0)
                 estoque_recomendado = int_safe(request.form.get("estoque_recomendado"), 0)
                 observacao = request.form.get("observacao", "").strip()
+                custo_produto = float_safe(request.form.get("custo_produto"), 0.0)
+                custo_mercado_livre = float_safe(request.form.get("custo_mercado_livre"), 0.0)
+                custo_impostos = float_safe(request.form.get("custo_impostos"), 0.0)
                 cur.execute(
                     """
                     UPDATE anuncios_full
-                    SET estoque_minimo = %s, estoque_recomendado = %s, observacao = %s, atualizado_em = CURRENT_TIMESTAMP
+                    SET estoque_minimo = %s, estoque_recomendado = %s, observacao = %s,
+                        custo_produto = %s, custo_mercado_livre = %s, custo_impostos = %s,
+                        atualizado_em = CURRENT_TIMESTAMP
                     WHERE id = %s
                     """,
-                    (estoque_minimo, estoque_recomendado, observacao, produto_id),
+                    (estoque_minimo, estoque_recomendado, observacao, custo_produto,
+                     custo_mercado_livre, custo_impostos, produto_id),
                 )
                 conn.commit()
-                flash("Estoque mínimo e recomendado atualizados.", "success")
+                flash("Configuração do anúncio atualizada.", "success")
                 return redirect(url_for("produto", produto_id=produto_id))
 
     return render_template("produto.html", row=row)
@@ -395,14 +526,24 @@ def importar():
                         old = old_by_code.get(codigo)
 
                         if old:
+                            imported_editable = {col: r.get(col) for col in EDITABLE_COLUMNS}
+                            editable = merge_editable(old, imported_editable)
+
                             changes = {}
                             for col in [
                                 "numero_produto", "titulo", "variacoes", "quantidade_full", "preco", "moeda",
                                 "condicao", "forma_entrega", "tipo_anuncio", "status", "altura_cm", "largura_cm",
-                                "profundidade_cm", "peso_kg", "ativo_no_relatorio"
+                                "profundidade_cm", "peso_kg", "ativo_no_relatorio",
+                                "estoque_minimo", "estoque_recomendado", "observacao",
+                                "custo_produto", "custo_mercado_livre", "custo_impostos"
                             ]:
                                 old_val = old.get(col)
-                                new_val = "SIM" if col == "ativo_no_relatorio" else r[col]
+                                if col == "ativo_no_relatorio":
+                                    new_val = "SIM"
+                                elif col in EDITABLE_COLUMNS:
+                                    new_val = editable[col]
+                                else:
+                                    new_val = r[col]
 
                                 old_norm = normalize_for_compare(old_val, col)
                                 new_norm = normalize_for_compare(new_val, col)
@@ -418,7 +559,9 @@ def importar():
                                 UPDATE anuncios_full
                                 SET numero_produto=%s, titulo=%s, variacoes=%s, quantidade_full=%s, preco=%s, moeda=%s,
                                     condicao=%s, forma_entrega=%s, tipo_anuncio=%s, status=%s, altura_cm=%s, largura_cm=%s,
-                                    profundidade_cm=%s, peso_kg=%s, ativo_no_relatorio='SIM', data_ultima_importacao=%s,
+                                    profundidade_cm=%s, peso_kg=%s, estoque_minimo=%s, estoque_recomendado=%s,
+                                    observacao=%s, custo_produto=%s, custo_mercado_livre=%s, custo_impostos=%s,
+                                    ativo_no_relatorio='SIM', data_ultima_importacao=%s,
                                     atualizado_em=CURRENT_TIMESTAMP
                                 WHERE codigo_anuncio=%s
                                 """,
@@ -426,7 +569,9 @@ def importar():
                                     r["numero_produto"], r["titulo"], r["variacoes"], int(r["quantidade_full"]),
                                     float(r["preco"]), r["moeda"], r["condicao"], r["forma_entrega"], r["tipo_anuncio"],
                                     r["status"], int(r["altura_cm"]), int(r["largura_cm"]), int(r["profundidade_cm"]),
-                                    float(r["peso_kg"]), import_time, codigo,
+                                    float(r["peso_kg"]), editable["estoque_minimo"], editable["estoque_recomendado"],
+                                    editable["observacao"], editable["custo_produto"], editable["custo_mercado_livre"],
+                                    editable["custo_impostos"], import_time, codigo,
                                 ),
                             )
                         else:
@@ -440,15 +585,20 @@ def importar():
                                 INSERT INTO anuncios_full (
                                     codigo_anuncio, numero_produto, titulo, variacoes, quantidade_full, preco, moeda, condicao,
                                     forma_entrega, tipo_anuncio, status, altura_cm, largura_cm, profundidade_cm, peso_kg,
-                                    estoque_minimo, estoque_recomendado, ativo_no_relatorio,
+                                    estoque_minimo, estoque_recomendado, observacao,
+                                    custo_produto, custo_mercado_livre, custo_impostos, ativo_no_relatorio,
                                     data_primeira_importacao, data_ultima_importacao
-                                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 0, 0, 'SIM', %s, %s)
+                                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'SIM', %s, %s)
                                 """,
                                 (
                                     codigo, r["numero_produto"], r["titulo"], r["variacoes"], int(r["quantidade_full"]),
                                     float(r["preco"]), r["moeda"], r["condicao"], r["forma_entrega"], r["tipo_anuncio"],
                                     r["status"], int(r["altura_cm"]), int(r["largura_cm"]), int(r["profundidade_cm"]),
-                                    float(r["peso_kg"]), import_time, import_time,
+                                    float(r["peso_kg"]),
+                                    int(r.get("estoque_minimo") or 0), int(r.get("estoque_recomendado") or 0),
+                                    r.get("observacao") or "", float(r.get("custo_produto") or 0),
+                                    float(r.get("custo_mercado_livre") or 0), float(r.get("custo_impostos") or 0),
+                                    import_time, import_time,
                                 ),
                             )
 
@@ -526,6 +676,9 @@ def exportar():
                 COALESCE(status, '') AS status,
                 COALESCE(forma_entrega, '') AS forma_entrega,
                 COALESCE(observacao, '') AS observacao,
+                COALESCE(custo_produto, 0) AS custo_produto,
+                COALESCE(custo_mercado_livre, 0) AS custo_mercado_livre,
+                COALESCE(custo_impostos, 0) AS custo_impostos,
                 COALESCE(ativo_no_relatorio, 'SIM') AS no_relatorio
             FROM anuncios_full
             WHERE UPPER(TRIM(COALESCE(ativo_no_relatorio, 'SIM'))) IN ('SIM', 'S', 'YES', 'TRUE', '1')
@@ -542,7 +695,10 @@ def exportar():
             preco,
             status,
             forma_entrega,
-            observacao
+            observacao,
+            custo_produto,
+            custo_mercado_livre,
+            custo_impostos
         FROM base
         WHERE quantidade_enviar_full > 0
            OR precisa_repor = 'SIM'
@@ -557,13 +713,150 @@ def exportar():
     colunas = [
         "codigo_anuncio", "numero_produto", "titulo", "quantidade_full",
         "estoque_minimo", "estoque_recomendado", "quantidade_enviar_full",
-        "precisa_repor", "preco", "status", "forma_entrega", "observacao"
+        "precisa_repor", "preco", "status", "forma_entrega", "observacao",
+        "custo_produto", "custo_mercado_livre", "custo_impostos"
     ]
     df = pd.DataFrame(rows, columns=colunas)
 
     # Mesmo que não haja itens, o CSV sai com cabeçalho para facilitar diagnóstico.
     df.to_csv(out_path, index=False, sep=";", encoding="utf-8-sig")
     return send_file(out_path, as_attachment=True, download_name="reposicao_full.csv")
+
+
+
+@app.route("/exportar-configuracao")
+def exportar_configuracao():
+    """Gera planilha com todos os anúncios e colunas editáveis para preenchimento em lote."""
+    init_db()
+    out_path = BASE_DIR / "configuracao_anuncios_full.xlsx"
+    sql = """
+        SELECT
+            codigo_anuncio AS CODIGO_ANUNCIO,
+            numero_produto AS SKU,
+            titulo AS TITULO,
+            ativo_no_relatorio AS NO_RELATORIO,
+            quantidade_full AS QUANTIDADE_FULL,
+            preco AS PRECO,
+            status AS STATUS,
+            estoque_minimo AS ESTOQUE_MINIMO,
+            estoque_recomendado AS ESTOQUE_RECOMENDADO,
+            COALESCE(observacao, '') AS OBSERVACAO,
+            COALESCE(custo_produto, 0) AS CUSTO_PRODUTO,
+            COALESCE(custo_mercado_livre, 0) AS CUSTO_MERCADO_LIVRE,
+            COALESCE(custo_impostos, 0) AS CUSTO_IMPOSTOS
+        FROM anuncios_full
+        ORDER BY ativo_no_relatorio DESC, titulo ASC
+    """
+    with get_conn() as conn:
+        df = pd.read_sql_query(sql, conn)
+
+    with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Configuração")
+        ws = writer.book["Configuração"]
+        ws.freeze_panes = "A2"
+        widths = {
+            "A": 18, "B": 16, "C": 55, "D": 14, "E": 16, "F": 12, "G": 14,
+            "H": 18, "I": 22, "J": 40, "K": 16, "L": 22, "M": 18,
+        }
+        for col, width in widths.items():
+            ws.column_dimensions[col].width = width
+        # Destaca as colunas editáveis.
+        from openpyxl.styles import Font, PatternFill
+        header_fill = PatternFill("solid", fgColor="1F2937")
+        editable_fill = PatternFill("solid", fgColor="FFF2CC")
+        for cell in ws[1]:
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = header_fill
+        for row in ws.iter_rows(min_row=2, min_col=8, max_col=13):
+            for cell in row:
+                cell.fill = editable_fill
+
+    return send_file(out_path, as_attachment=True, download_name="configuracao_anuncios_full.xlsx")
+
+
+@app.route("/importar-configuracao", methods=["GET", "POST"])
+def importar_configuracao():
+    """Importa planilha preenchida com estoque mínimo/recomendado, observação e custos."""
+    init_db()
+    resultado = None
+    if request.method == "POST":
+        file = request.files.get("arquivo")
+        if not file or not file.filename:
+            flash("Selecione a planilha de configuração.", "warning")
+            return redirect(url_for("importar_configuracao"))
+
+        filename = f"configuracao_{agora_brasil().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        path = UPLOAD_DIR / filename
+        file.save(path)
+
+        try:
+            df = pd.read_excel(path, sheet_name=0)
+            if df.empty:
+                raise ValueError("Planilha vazia.")
+            codigo_col = find_column(df, ["CODIGO_ANUNCIO", "CODIGO ANUNCIO", "CÓDIGO ANÚNCIO", "ITEM_ID"])
+            if not codigo_col:
+                raise ValueError("Coluna CODIGO_ANUNCIO não encontrada.")
+
+            atualizados = []
+            ignorados = []
+            sem_alteracao = 0
+
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    for idx in df.index:
+                        codigo = str(df.at[idx, codigo_col] or "").strip()
+                        if not codigo or codigo.lower() == "nan":
+                            continue
+                        cur.execute("SELECT * FROM anuncios_full WHERE codigo_anuncio = %s", (codigo,))
+                        old = cur.fetchone()
+                        if not old:
+                            ignorados.append(codigo)
+                            continue
+
+                        imported = extract_editable_values(df, idx)
+                        editable = merge_editable(old, imported)
+
+                        mudou = False
+                        for col in EDITABLE_COLUMNS:
+                            if normalize_for_compare(old.get(col), col) != normalize_for_compare(editable[col], col):
+                                mudou = True
+                                break
+
+                        if not mudou:
+                            sem_alteracao += 1
+                            continue
+
+                        cur.execute(
+                            """
+                            UPDATE anuncios_full
+                            SET estoque_minimo=%s,
+                                estoque_recomendado=%s,
+                                observacao=%s,
+                                custo_produto=%s,
+                                custo_mercado_livre=%s,
+                                custo_impostos=%s,
+                                atualizado_em=CURRENT_TIMESTAMP
+                            WHERE codigo_anuncio=%s
+                            """,
+                            (
+                                editable["estoque_minimo"], editable["estoque_recomendado"], editable["observacao"],
+                                editable["custo_produto"], editable["custo_mercado_livre"], editable["custo_impostos"], codigo,
+                            ),
+                        )
+                        atualizados.append(codigo)
+                conn.commit()
+
+            resultado = {
+                "arquivo": file.filename,
+                "atualizados": atualizados,
+                "ignorados": ignorados,
+                "sem_alteracao": sem_alteracao,
+            }
+            flash("Planilha de configuração importada com sucesso.", "success")
+        except Exception as e:
+            flash(f"Erro ao importar configuração: {e}", "danger")
+
+    return render_template("importar_configuracao.html", resultado=resultado)
 
 
 @app.route("/diagnostico-exportacao")

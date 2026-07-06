@@ -1,15 +1,31 @@
-# Radar Full Gutos Car - v9
+# Radar Full Gutos Car — v11 custos e configuração por planilha
 
-Correção do erro no Render/PostgreSQL:
+Versão baseada na v10 estável, com novos campos editáveis:
 
-`psycopg.errors.TooManyColumns: tables can have at most 1600 columns`
+- estoque_minimo
+- estoque_recomendado
+- observacao
+- custo_produto
+- custo_mercado_livre
+- custo_impostos
 
-Causa: a versão anterior fazia `ALTER TABLE DROP COLUMN` e `ADD COLUMN` das colunas geradas em toda abertura da aplicação. No PostgreSQL, colunas removidas continuam ocupando metadados internos até recriar a tabela. Repetir isso muitas vezes fez a tabela atingir o limite interno.
+Novas funções:
 
-Correção: removida a migração repetitiva do `init_db()`. Agora a aplicação não fica recriando as colunas geradas a cada acesso.
+- Baixar planilha de configuração com todos os anúncios.
+- Importar planilha preenchida para atualizar os campos editáveis em lote.
+- A importação do relatório de anúncios também aceita essas colunas opcionais. Células em branco preservam o valor já salvo no banco.
 
-Para atualizar no GitHub, substitua principalmente:
+Rotas novas:
+
+- `/exportar-configuracao`
+- `/importar-configuracao`
+
+Para atualizar a versão atual no GitHub, substitua principalmente:
 
 - `app.py`
+- `templates/base.html`
+- `templates/produto.html`
+- `templates/importar.html`
+- adicione `templates/importar_configuracao.html`
 
-Os templates podem permanecer como estão, salvo se você quiser substituir tudo pela versão deste pacote.
+Os dados continuam salvos no PostgreSQL via `DATABASE_URL`.
