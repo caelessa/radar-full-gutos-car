@@ -1,37 +1,15 @@
-# Radar Full Gutos Car - PostgreSQL
+# Radar Full Gutos Car - v9
 
-Versão web Flask usando PostgreSQL via variável `DATABASE_URL`.
+Correção do erro no Render/PostgreSQL:
 
-## Variáveis no Render
+`psycopg.errors.TooManyColumns: tables can have at most 1600 columns`
 
-Crie uma variável de ambiente:
+Causa: a versão anterior fazia `ALTER TABLE DROP COLUMN` e `ADD COLUMN` das colunas geradas em toda abertura da aplicação. No PostgreSQL, colunas removidas continuam ocupando metadados internos até recriar a tabela. Repetir isso muitas vezes fez a tabela atingir o limite interno.
 
-```text
-DATABASE_URL=<string de conexão PostgreSQL>
-```
+Correção: removida a migração repetitiva do `init_db()`. Agora a aplicação não fica recriando as colunas geradas a cada acesso.
 
-Opcional:
+Para atualizar no GitHub, substitua principalmente:
 
-```text
-SECRET_KEY=uma-chave-qualquer
-```
+- `app.py`
 
-## Comandos no Render
-
-Build Command:
-
-```bash
-pip install -r requirements.txt
-```
-
-Start Command:
-
-```bash
-gunicorn app:app
-```
-
-## Observação
-
-Na primeira execução, a aplicação cria a tabela `anuncios_full` no PostgreSQL. Se a tabela estiver vazia, ela carrega automaticamente os dados iniciais do arquivo `radar_full_gutos.db` incluído no projeto.
-
-Depois disso, alterações de estoque mínimo/recomendado e importações ficam salvas no PostgreSQL, não no disco temporário do Render.
+Os templates podem permanecer como estão, salvo se você quiser substituir tudo pela versão deste pacote.
