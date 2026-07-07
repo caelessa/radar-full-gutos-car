@@ -619,6 +619,30 @@ def confirmar_zerado(produto_id: int):
     return redirect(request.referrer or url_for("index", filtro="repor"))
 
 
+@app.route("/excluir-anuncio/<int:produto_id>", methods=["POST"])
+def excluir_anuncio(produto_id: int):
+    """Exclui definitivamente um anúncio da base operacional do Radar Full.
+
+    Use quando um item aparecer como ZERADO?, mas após conferência foi retirado do Full
+    ou não deve mais ser controlado. Se o anúncio voltar em um relatório futuro,
+    a importação irá cadastrá-lo novamente como novo anúncio.
+    """
+    init_db()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT codigo_anuncio, titulo FROM anuncios_full WHERE id = %s", (produto_id,))
+            row = cur.fetchone()
+            if not row:
+                flash("Anúncio não encontrado para exclusão.", "danger")
+                return redirect(url_for("index", filtro="zerado"))
+
+            cur.execute("DELETE FROM anuncios_full WHERE id = %s", (produto_id,))
+        conn.commit()
+
+    flash(f"Anúncio {row['codigo_anuncio']} excluído da base do Radar Full. Se voltar em relatório futuro, será incluído novamente.", "success")
+    return redirect(url_for("index", filtro="zerado"))
+
+
 @app.route("/importar", methods=["GET", "POST"])
 def importar():
     init_db()

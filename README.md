@@ -38,3 +38,11 @@ Ao confirmar, o sistema:
 - adiciona uma observação automática com data e hora;
 - mantém `No relatório = NÃO`;
 - passa a tratar o item como reposição `SIM`, usando estoque recomendado ou mínimo para calcular a quantidade a enviar.
+
+
+## Versão 16 - Excluir da base
+
+Para itens marcados como `ZERADO?`, agora existem duas ações:
+
+- **Confirmar zerado**: usado quando o estoque realmente acabou no Full. Atualiza `quantidade_full = 0` e mantém o item na reposição.
+- **Excluir da base**: usado quando o anúncio foi retirado do Full ou não deve mais ser controlado. Remove o registro de `anuncios_full`. Se o anúncio voltar em um relatório futuro, a importação irá cadastrá-lo novamente automaticamente.
