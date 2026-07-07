@@ -102,6 +102,10 @@
               onsubmit="return confirm('Confirmar que este anúncio realmente zerou no Full e atualizar quantidade_full para 0?');">
           <button class="btn btn-sm btn-warning text-dark ms-1">Confirmar zerado</button>
         </form>
+        <form method="post" action="{{ url_for('excluir_anuncio', produto_id=r.id) }}" class="d-inline"
+              onsubmit="return confirm('Excluir este anúncio definitivamente da base do Radar Full? Se ele voltar em um relatório futuro, será incluído novamente.');">
+          <button class="btn btn-sm btn-outline-danger ms-1">Excluir da base</button>
+        </form>
         {% endif %}
       </td>
     </tr>
