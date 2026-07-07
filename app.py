@@ -73,6 +73,7 @@ ANUNCIOS_FULL_SCHEMA_COLUMNS = [
     ("criado_em", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
     ("atualizado_em", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
     ("ativo_no_relatorio", "TEXT DEFAULT 'SIM'"),
+    ("zerado_confirmado", "BOOLEAN NOT NULL DEFAULT FALSE"),
     ("data_ultima_importacao", "TEXT"),
     ("data_primeira_importacao", "TEXT"),
     ("observacao", "TEXT"),
@@ -84,7 +85,7 @@ ANUNCIOS_FULL_SCHEMA_COLUMNS = [
 BASE_COPY_COLUMNS = [
     "codigo_anuncio", "numero_produto", "titulo", "variacoes", "quantidade_full", "preco", "moeda", "condicao",
     "forma_entrega", "tipo_anuncio", "status", "altura_cm", "largura_cm", "profundidade_cm", "peso_kg",
-    "estoque_minimo", "estoque_recomendado", "criado_em", "atualizado_em", "ativo_no_relatorio",
+    "estoque_minimo", "estoque_recomendado", "criado_em", "atualizado_em", "ativo_no_relatorio", "zerado_confirmado",
     "data_ultima_importacao", "data_primeira_importacao", "observacao", "custo_produto", "custo_mercado_livre", "custo_impostos"
 ]
 
@@ -133,6 +134,8 @@ def rebuild_anuncios_full_table(cur) -> None:
                 select_exprs.append(f"0 AS {col}")
             elif col == "ativo_no_relatorio":
                 select_exprs.append("'SIM' AS ativo_no_relatorio")
+            elif col == "zerado_confirmado":
+                select_exprs.append("FALSE AS zerado_confirmado")
             elif col in {"criado_em", "atualizado_em"}:
                 select_exprs.append(f"CURRENT_TIMESTAMP AS {col}")
             else:
@@ -155,7 +158,7 @@ def rebuild_anuncios_full_table(cur) -> None:
 
 
 def ensure_anuncios_columns(cur) -> None:
-    required = {"observacao", "custo_produto", "custo_mercado_livre", "custo_impostos"}
+    required = {"observacao", "custo_produto", "custo_mercado_livre", "custo_impostos", "zerado_confirmado"}
     existing = get_existing_columns(cur, "anuncios_full")
     missing = required - existing
     if not missing:
@@ -224,10 +227,10 @@ def seed_from_sqlite() -> None:
                     INSERT INTO anuncios_full (
                         codigo_anuncio, numero_produto, titulo, variacoes, quantidade_full, preco, moeda, condicao,
                         forma_entrega, tipo_anuncio, status, altura_cm, largura_cm, profundidade_cm, peso_kg,
-                        estoque_minimo, estoque_recomendado, ativo_no_relatorio,
+                        estoque_minimo, estoque_recomendado, ativo_no_relatorio, zerado_confirmado,
                         data_primeira_importacao, data_ultima_importacao, observacao,
                         custo_produto, custo_mercado_livre, custo_impostos
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (codigo_anuncio) DO NOTHING
                     """,
                     (
@@ -236,7 +239,7 @@ def seed_from_sqlite() -> None:
                         r.get("condicao"), r.get("forma_entrega"), r.get("tipo_anuncio"), r.get("status"),
                         int(r.get("altura_cm") or 0), int(r.get("largura_cm") or 0), int(r.get("profundidade_cm") or 0),
                         float(r.get("peso_kg") or 0), int(r.get("estoque_minimo") or 0),
-                        int(r.get("estoque_recomendado") or 0), r.get("ativo_no_relatorio") or "SIM",
+                        int(r.get("estoque_recomendado") or 0), r.get("ativo_no_relatorio") or "SIM", bool(r.get("zerado_confirmado") or False),
                         r.get("data_primeira_importacao"), r.get("data_ultima_importacao"), r.get("observacao"),
                         float(r.get("custo_produto") or 0), float(r.get("custo_mercado_livre") or 0),
                         float(r.get("custo_impostos") or 0),
@@ -457,6 +460,15 @@ def index():
     busca = request.args.get("busca", "").strip()
     filtro = request.args.get("filtro", "ativos")
 
+    # Regras calculadas na consulta, sem depender apenas das colunas geradas do banco.
+    # Quando um anúncio some do relatório, mas antes tinha estoque Full, ele pode ter zerado.
+    active_expr = "UPPER(TRIM(COALESCE(ativo_no_relatorio, 'SIM'))) IN ('SIM', 'S', 'YES', 'TRUE', '1')"
+    zerado_confirmado_expr = "COALESCE(zerado_confirmado, FALSE)"
+    zerado_expr = f"NOT ({active_expr}) AND COALESCE(quantidade_full, 0) > 0 AND NOT ({zerado_confirmado_expr})"
+    alvo_expr = "(CASE WHEN COALESCE(estoque_recomendado, 0) > 0 THEN COALESCE(estoque_recomendado, 0) ELSE COALESCE(estoque_minimo, 0) END)"
+    quantidade_calc_expr = f"(CASE WHEN {zerado_expr} OR ({zerado_confirmado_expr}) THEN GREATEST({alvo_expr}, 0) ELSE GREATEST({alvo_expr} - COALESCE(quantidade_full, 0), 0) END)"
+    reposicao_expr = f"(CASE WHEN {zerado_expr} THEN 'ZERADO?' WHEN ({zerado_confirmado_expr}) AND {alvo_expr} > 0 THEN 'SIM' WHEN ({active_expr}) AND COALESCE(estoque_minimo, 0) > 0 AND COALESCE(quantidade_full, 0) <= COALESCE(estoque_minimo, 0) THEN 'SIM' ELSE 'NAO' END)"
+
     where = []
     params: list[Any] = []
 
@@ -466,42 +478,51 @@ def index():
         params.extend([termo, termo, termo])
 
     if filtro == "ativos":
-        where.append("ativo_no_relatorio = 'SIM'")
+        where.append(active_expr)
     elif filtro == "inativos":
-        where.append("ativo_no_relatorio = 'NAO'")
+        where.append(f"NOT ({active_expr})")
     elif filtro == "status_ativo":
-        where.append("ativo_no_relatorio = 'SIM' AND status ILIKE %s")
+        where.append(f"({active_expr}) AND status ILIKE %s")
         params.append('ativo%')
     elif filtro == "status_inativo":
-        where.append("ativo_no_relatorio = 'SIM' AND status ILIKE %s")
+        where.append(f"({active_expr}) AND status ILIKE %s")
         params.append('inativo%')
     elif filtro == "repor":
-        where.append("ativo_no_relatorio = 'SIM' AND precisa_repor = 'SIM'")
+        where.append(f"{reposicao_expr} IN ('SIM', 'ZERADO?')")
+    elif filtro == "zerado":
+        where.append(zerado_expr)
     elif filtro == "enviar":
-        where.append("ativo_no_relatorio = 'SIM' AND quantidade_enviar_full > 0")
+        where.append(f"{quantidade_calc_expr} > 0")
     elif filtro in {"sem_config", "novos"}:
-        where.append("ativo_no_relatorio = 'SIM' AND estoque_minimo = 0 AND estoque_recomendado = 0")
+        where.append(f"({active_expr}) AND estoque_minimo = 0 AND estoque_recomendado = 0")
 
-    sql = "SELECT * FROM anuncios_full"
+    sql = f"""
+        SELECT
+            *,
+            {quantidade_calc_expr}::INTEGER AS quantidade_enviar_display,
+            {reposicao_expr} AS reposicao_status
+        FROM anuncios_full
+    """
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY ativo_no_relatorio DESC, quantidade_enviar_full DESC, titulo ASC"
+    sql += " ORDER BY CASE WHEN " + zerado_expr + " THEN 0 ELSE 1 END, ativo_no_relatorio DESC, quantidade_enviar_display DESC, titulo ASC"
 
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(sql, params)
             rows = cur.fetchall()
             cur.execute(
-                """
+                f"""
                 SELECT
                     COUNT(*) AS total_base,
-                    COALESCE(SUM(CASE WHEN ativo_no_relatorio = 'SIM' THEN 1 ELSE 0 END), 0) AS total_anuncios,
-                    COALESCE(SUM(CASE WHEN ativo_no_relatorio = 'NAO' THEN 1 ELSE 0 END), 0) AS total_inativos,
-                    COALESCE(SUM(CASE WHEN ativo_no_relatorio = 'SIM' AND status ILIKE 'inativo%%' THEN 1 ELSE 0 END), 0) AS total_status_inativo,
-                    COALESCE(SUM(CASE WHEN ativo_no_relatorio = 'SIM' THEN quantidade_full ELSE 0 END), 0) AS total_full,
-                    COALESCE(SUM(CASE WHEN ativo_no_relatorio = 'SIM' THEN quantidade_enviar_full ELSE 0 END), 0) AS total_enviar,
-                    COALESCE(SUM(CASE WHEN ativo_no_relatorio = 'SIM' AND precisa_repor = 'SIM' THEN 1 ELSE 0 END), 0) AS qtd_repor,
-                    COALESCE(SUM(CASE WHEN ativo_no_relatorio = 'SIM' AND estoque_minimo = 0 AND estoque_recomendado = 0 THEN 1 ELSE 0 END), 0) AS sem_config
+                    COALESCE(SUM(CASE WHEN {active_expr} THEN 1 ELSE 0 END), 0) AS total_anuncios,
+                    COALESCE(SUM(CASE WHEN NOT ({active_expr}) THEN 1 ELSE 0 END), 0) AS total_inativos,
+                    COALESCE(SUM(CASE WHEN ({active_expr}) AND status ILIKE 'inativo%%' THEN 1 ELSE 0 END), 0) AS total_status_inativo,
+                    COALESCE(SUM(CASE WHEN {active_expr} THEN quantidade_full ELSE 0 END), 0) AS total_full,
+                    COALESCE(SUM({quantidade_calc_expr}), 0) AS total_enviar,
+                    COALESCE(SUM(CASE WHEN {reposicao_expr} IN ('SIM', 'ZERADO?') THEN 1 ELSE 0 END), 0) AS qtd_repor,
+                    COALESCE(SUM(CASE WHEN {zerado_expr} THEN 1 ELSE 0 END), 0) AS qtd_zerado,
+                    COALESCE(SUM(CASE WHEN ({active_expr}) AND estoque_minimo = 0 AND estoque_recomendado = 0 THEN 1 ELSE 0 END), 0) AS sem_config
                 FROM anuncios_full
                 """
             )
@@ -560,6 +581,42 @@ def produto(produto_id: int):
                 return redirect(url_for("produto", produto_id=produto_id))
 
     return render_template("produto.html", row=row)
+
+
+@app.route("/confirmar-zerado/<int:produto_id>", methods=["POST"])
+def confirmar_zerado(produto_id: int):
+    """Confirma manualmente que um anúncio ausente do relatório realmente zerou no Full.
+
+    Mantém No relatório = NÃO, mas grava quantidade_full = 0 e zerado_confirmado = TRUE.
+    Assim ele deixa de aparecer como ZERADO? e passa a entrar como reposição SIM,
+    usando estoque_recomendado ou estoque_minimo para calcular a quantidade a enviar.
+    """
+    init_db()
+    nota = f"Estoque Full zerado confirmado manualmente em {agora_brasil_str()}"
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT codigo_anuncio, titulo FROM anuncios_full WHERE id = %s", (produto_id,))
+            row = cur.fetchone()
+            if not row:
+                flash("Anúncio não encontrado para confirmar zerado.", "danger")
+                return redirect(url_for("index"))
+            cur.execute(
+                """
+                UPDATE anuncios_full
+                SET quantidade_full = 0,
+                    zerado_confirmado = TRUE,
+                    observacao = CASE
+                        WHEN COALESCE(observacao, '') = '' THEN %s
+                        ELSE observacao || ' | ' || %s
+                    END,
+                    atualizado_em = CURRENT_TIMESTAMP
+                WHERE id = %s
+                """,
+                (nota, nota, produto_id),
+            )
+        conn.commit()
+    flash(f"Zerado confirmado para {row['codigo_anuncio']}. O estoque Full foi atualizado para 0.", "success")
+    return redirect(request.referrer or url_for("index", filtro="repor"))
 
 
 @app.route("/importar", methods=["GET", "POST"])
@@ -637,7 +694,7 @@ def importar():
                                     condicao=%s, forma_entrega=%s, tipo_anuncio=%s, status=%s, altura_cm=%s, largura_cm=%s,
                                     profundidade_cm=%s, peso_kg=%s, estoque_minimo=%s, estoque_recomendado=%s,
                                     observacao=%s, custo_produto=%s, custo_mercado_livre=%s, custo_impostos=%s,
-                                    ativo_no_relatorio='SIM', data_ultima_importacao=%s,
+                                    ativo_no_relatorio='SIM', zerado_confirmado=FALSE, data_ultima_importacao=%s,
                                     atualizado_em=CURRENT_TIMESTAMP
                                 WHERE codigo_anuncio=%s
                                 """,
@@ -719,66 +776,42 @@ def exportar():
     init_db()
     out_path = BASE_DIR / "reposicao_full.csv"
 
-    # Exportação robusta:
-    # - não depende da coluna gerada quantidade_enviar_full;
-    # - recalcula a reposição na hora;
-    # - trata NULL como zero;
-    # - aceita variações de ativo_no_relatorio, como SIM/sim/S/true/1;
-    # - exporta tudo que tem quantidade a enviar > 0 ou reposição = SIM.
-    sql = """
-        WITH base AS (
-            SELECT
-                codigo_anuncio,
-                numero_produto,
-                titulo,
-                COALESCE(quantidade_full, 0)::INTEGER AS quantidade_full,
-                COALESCE(estoque_minimo, 0)::INTEGER AS estoque_minimo,
-                COALESCE(estoque_recomendado, 0)::INTEGER AS estoque_recomendado,
-                GREATEST(
-                    (CASE
-                        WHEN COALESCE(estoque_recomendado, 0) > 0
-                            THEN COALESCE(estoque_recomendado, 0)
-                        ELSE COALESCE(estoque_minimo, 0)
-                     END) - COALESCE(quantidade_full, 0),
-                    0
-                )::INTEGER AS quantidade_enviar_full,
-                CASE
-                    WHEN COALESCE(estoque_minimo, 0) > 0
-                     AND COALESCE(quantidade_full, 0) <= COALESCE(estoque_minimo, 0)
-                    THEN 'SIM'
-                    ELSE 'NAO'
-                END AS precisa_repor,
-                COALESCE(preco, 0) AS preco,
-                COALESCE(status, '') AS status,
-                COALESCE(forma_entrega, '') AS forma_entrega,
-                COALESCE(observacao, '') AS observacao,
-                COALESCE(custo_produto, 0) AS custo_produto,
-                COALESCE(custo_mercado_livre, 0) AS custo_mercado_livre,
-                COALESCE(custo_impostos, 0) AS custo_impostos,
-                COALESCE(ativo_no_relatorio, 'SIM') AS no_relatorio
-            FROM anuncios_full
-            WHERE UPPER(TRIM(COALESCE(ativo_no_relatorio, 'SIM'))) IN ('SIM', 'S', 'YES', 'TRUE', '1')
-        )
+    # Exportação robusta com a nova situação "ZERADO?":
+    # - anúncio presente no relatório calcula normalmente;
+    # - anúncio ausente, mas que ainda tinha quantidade_full > 0 no banco, aparece como ZERADO?;
+    # - para ZERADO?, a quantidade a enviar considera estoque atual como 0.
+    active_expr = "UPPER(TRIM(COALESCE(ativo_no_relatorio, 'SIM'))) IN ('SIM', 'S', 'YES', 'TRUE', '1')"
+    zerado_confirmado_expr = "COALESCE(zerado_confirmado, FALSE)"
+    zerado_expr = f"NOT ({active_expr}) AND COALESCE(quantidade_full, 0) > 0 AND NOT ({zerado_confirmado_expr})"
+    alvo_expr = "(CASE WHEN COALESCE(estoque_recomendado, 0) > 0 THEN COALESCE(estoque_recomendado, 0) ELSE COALESCE(estoque_minimo, 0) END)"
+    quantidade_calc_expr = f"(CASE WHEN {zerado_expr} OR ({zerado_confirmado_expr}) THEN GREATEST({alvo_expr}, 0) ELSE GREATEST({alvo_expr} - COALESCE(quantidade_full, 0), 0) END)"
+    reposicao_expr = f"(CASE WHEN {zerado_expr} THEN 'ZERADO?' WHEN ({zerado_confirmado_expr}) AND {alvo_expr} > 0 THEN 'SIM' WHEN ({active_expr}) AND COALESCE(estoque_minimo, 0) > 0 AND COALESCE(quantidade_full, 0) <= COALESCE(estoque_minimo, 0) THEN 'SIM' ELSE 'NAO' END)"
+
+    sql = f"""
         SELECT
             codigo_anuncio,
             numero_produto,
             titulo,
-            quantidade_full,
-            estoque_minimo,
-            estoque_recomendado,
-            quantidade_enviar_full,
-            precisa_repor,
-            preco,
-            status,
-            forma_entrega,
-            observacao,
-            custo_produto,
-            custo_mercado_livre,
-            custo_impostos
-        FROM base
-        WHERE quantidade_enviar_full > 0
-           OR precisa_repor = 'SIM'
-        ORDER BY quantidade_enviar_full DESC, titulo ASC
+            COALESCE(ativo_no_relatorio, 'SIM') AS no_relatorio,
+            COALESCE(quantidade_full, 0)::INTEGER AS quantidade_full,
+            COALESCE(estoque_minimo, 0)::INTEGER AS estoque_minimo,
+            COALESCE(estoque_recomendado, 0)::INTEGER AS estoque_recomendado,
+            {quantidade_calc_expr}::INTEGER AS quantidade_enviar_full,
+            {reposicao_expr} AS precisa_repor,
+            COALESCE(preco, 0) AS preco,
+            COALESCE(status, '') AS status,
+            COALESCE(forma_entrega, '') AS forma_entrega,
+            COALESCE(observacao, '') AS observacao,
+            COALESCE(custo_produto, 0) AS custo_produto,
+            COALESCE(custo_mercado_livre, 0) AS custo_mercado_livre,
+            COALESCE(custo_impostos, 0) AS custo_impostos
+        FROM anuncios_full
+        WHERE {quantidade_calc_expr} > 0
+           OR {reposicao_expr} IN ('SIM', 'ZERADO?')
+        ORDER BY
+            CASE WHEN {reposicao_expr} = 'ZERADO?' THEN 0 WHEN {reposicao_expr} = 'SIM' THEN 1 ELSE 2 END,
+            quantidade_enviar_full DESC,
+            titulo ASC
     """
 
     with get_conn() as conn:
@@ -787,17 +820,15 @@ def exportar():
             rows = cur.fetchall()
 
     colunas = [
-        "codigo_anuncio", "numero_produto", "titulo", "quantidade_full",
+        "codigo_anuncio", "numero_produto", "titulo", "no_relatorio", "quantidade_full",
         "estoque_minimo", "estoque_recomendado", "quantidade_enviar_full",
         "precisa_repor", "preco", "status", "forma_entrega", "observacao",
         "custo_produto", "custo_mercado_livre", "custo_impostos"
     ]
     df = pd.DataFrame(rows, columns=colunas)
 
-    # Mesmo que não haja itens, o CSV sai com cabeçalho para facilitar diagnóstico.
     df.to_csv(out_path, index=False, sep=";", encoding="utf-8-sig")
     return send_file(out_path, as_attachment=True, download_name="reposicao_full.csv")
-
 
 
 @app.route("/exportar-configuracao")

@@ -1,31 +1,40 @@
-# Radar Full Gutos Car — v11 custos e configuração por planilha
+# Radar Full Gutos Car - v14 Reposição ZERADO?
 
-Versão baseada na v10 estável, com novos campos editáveis:
+Baseada na versão robusta com PostgreSQL, custos e planilha de configuração.
 
-- estoque_minimo
-- estoque_recomendado
-- observacao
-- custo_produto
-- custo_mercado_livre
-- custo_impostos
+## Alteração principal
 
-Novas funções:
+A coluna **Reposição** agora pode mostrar:
 
-- Baixar planilha de configuração com todos os anúncios.
-- Importar planilha preenchida para atualizar os campos editáveis em lote.
-- A importação do relatório de anúncios também aceita essas colunas opcionais. Células em branco preservam o valor já salvo no banco.
+- `SIM`: produto presente no relatório e abaixo/igual ao estoque mínimo.
+- `NÃO`: produto sem necessidade crítica de reposição.
+- `ZERADO?`: produto não apareceu no último relatório, mas tinha estoque Full registrado anteriormente. O sistema considera como possível estoque zerado e destaca em amarelo para conferência do usuário.
 
-Rotas novas:
+## Cálculo para ZERADO?
 
-- `/exportar-configuracao`
-- `/importar-configuracao`
+Quando o anúncio fica como `ZERADO?`, a quantidade a enviar considera o estoque atual como 0:
 
-Para atualizar a versão atual no GitHub, substitua principalmente:
+- Se houver `estoque_recomendado`, enviar = estoque_recomendado.
+- Se não houver recomendado, enviar = estoque_minimo.
+
+## Arquivos principais alterados
 
 - `app.py`
-- `templates/base.html`
-- `templates/produto.html`
-- `templates/importar.html`
-- adicione `templates/importar_configuracao.html`
+- `templates/index.html`
 
-Os dados continuam salvos no PostgreSQL via `DATABASE_URL`.
+## Observação
+
+A exportação CSV de reposição também passa a incluir os itens marcados como `ZERADO?`.
+
+
+## v15 - Confirmar zerado
+
+Adicionado botão **Confirmar zerado** para anúncios marcados como `ZERADO?`.
+
+Ao confirmar, o sistema:
+
+- grava `quantidade_full = 0`;
+- marca `zerado_confirmado = TRUE`;
+- adiciona uma observação automática com data e hora;
+- mantém `No relatório = NÃO`;
+- passa a tratar o item como reposição `SIM`, usando estoque recomendado ou mínimo para calcular a quantidade a enviar.
