@@ -26,6 +26,7 @@
   <div class="col-md-2"><div class="card metric"><div class="card-body"><small>Unidades no Full</small><h3>{{ metrics.total_full or 0 }}</h3></div></div></div>
   <div class="col-md-2"><div class="card metric"><div class="card-body"><small>Total a enviar</small><h3>{{ metrics.total_enviar or 0 }}</h3></div></div></div>
   <div class="col-md-2"><div class="card metric"><div class="card-body"><small>Precisam repor</small><h3>{{ metrics.qtd_repor or 0 }}</h3></div></div></div>
+  <div class="col-md-2"><div class="card metric border-warning"><div class="card-body"><small>Zerado?</small><h3>{{ metrics.qtd_zerado or 0 }}</h3></div></div></div>
   <div class="col-md-2"><div class="card metric"><div class="card-body"><small>Sem configuração</small><h3>{{ metrics.sem_config or 0 }}</h3></div></div></div>
   <div class="col-md-2"><div class="card metric"><div class="card-body"><small>Ausentes do relatório</small><h3>{{ metrics.total_inativos or 0 }}</h3></div></div></div>
   <div class="col-md-2"><div class="card metric"><div class="card-body"><small>Status inativo ML</small><h3>{{ metrics.total_status_inativo or 0 }}</h3></div></div></div>
@@ -42,7 +43,8 @@
       <option value="status_ativo" {% if filtro == 'status_ativo' %}selected{% endif %}>Status ativo no Mercado Livre</option>
       <option value="status_inativo" {% if filtro == 'status_inativo' %}selected{% endif %}>Status inativo no Mercado Livre</option>
       <option value="enviar" {% if filtro == 'enviar' %}selected{% endif %}>Com quantidade a enviar</option>
-      <option value="repor" {% if filtro == 'repor' %}selected{% endif %}>Atingiu estoque mínimo</option>
+      <option value="repor" {% if filtro == 'repor' %}selected{% endif %}>Atingiu estoque mínimo/Zerado?</option>
+      <option value="zerado" {% if filtro == 'zerado' %}selected{% endif %}>Possível zerado</option>
       <option value="sem_config" {% if filtro == 'sem_config' %}selected{% endif %}>Sem mínimo/recomendado</option>
       <option value="inativos" {% if filtro == 'inativos' %}selected{% endif %}>Ausentes do último relatório</option>
     </select>
@@ -71,7 +73,7 @@
   </thead>
   <tbody>
     {% for r in rows %}
-    <tr>
+    <tr class="{% if r.reposicao_status == 'ZERADO?' %}table-warning{% endif %}">
       <td>{{ r.codigo_anuncio }}</td>
       <td>{{ r.numero_produto }}</td>
       <td>{{ r.titulo }}</td>
@@ -81,13 +83,27 @@
       <td class="text-end">{{ r.quantidade_full }}</td>
       <td class="text-end">{{ r.estoque_minimo }}</td>
       <td class="text-end">{{ r.estoque_recomendado }}</td>
-      <td class="text-end fw-bold">{{ r.quantidade_enviar_full }}</td>
+      <td class="text-end fw-bold">{{ r.quantidade_enviar_display }}</td>
       <td>
-        {% if r.precisa_repor == 'SIM' %}<span class="badge bg-danger">SIM</span>{% else %}<span class="badge bg-secondary">NÃO</span>{% endif %}
+        {% if r.reposicao_status == 'ZERADO?' %}
+          <span class="badge bg-warning text-dark">ZERADO?</span>
+        {% elif r.reposicao_status == 'SIM' %}
+          <span class="badge bg-danger">SIM</span>
+        {% else %}
+          <span class="badge bg-secondary">NÃO</span>
+        {% endif %}
       </td>
       <td class="text-end">R$ {{ "%.2f"|format(r.preco or 0) }}</td>
       <td>{{ r.status }}</td>
-      <td><a class="btn btn-sm btn-outline-primary" href="{{ url_for('produto', produto_id=r.id) }}">Editar</a></td>
+      <td class="text-nowrap">
+        <a class="btn btn-sm btn-outline-primary" href="{{ url_for('produto', produto_id=r.id) }}">Editar</a>
+        {% if r.reposicao_status == 'ZERADO?' %}
+        <form method="post" action="{{ url_for('confirmar_zerado', produto_id=r.id) }}" class="d-inline"
+              onsubmit="return confirm('Confirmar que este anúncio realmente zerou no Full e atualizar quantidade_full para 0?');">
+          <button class="btn btn-sm btn-warning text-dark ms-1">Confirmar zerado</button>
+        </form>
+        {% endif %}
+      </td>
     </tr>
     {% endfor %}
   </tbody>
